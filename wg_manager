@@ -721,13 +721,19 @@ EOF
     fi
 }
 
+frag6() { awk '/^Ip6FragCreates/{print $2}' /proc/net/snmp6 2>/dev/null; }
+
 babel_probe() { # ifn ll mtu [endpunkt] [mark] -> 0, wenn ein Paket dieser Größe unzerlegt hin und zurück kommt
-    local c
+    local c f
     # Schnittstelle genau auf die geprüfte Größe: WireGuard füllt Pakete auf ein Vielfaches von 16 auf,
     # aber nie über die MTU – so misst die Probe dasselbe, was später eingestellt wird
     ip link set dev "$1" mtu "$3"
+    f=$(frag6)
     ping -6 -c 2 -W 2 -s $(($3 - 48)) -I "$1" "$2" >/dev/null 2>&1 || return 1
-    # kam es nur zerlegt an? Dann steht für den Endpunkt eine kleinere MTU im Routen-Cache
+    # IPv6 zerlegt nur der Absender selbst (wegen der eigenen Ausgangs-MTU, z. B. ein 1412er-Uplink-Tunnel,
+    # oder einer gemeldeten Pfad-MTU) – stieg der Zähler, kam das Paket nur in Stücken durch
+    [ "$(frag6)" = "$f" ] || return 1
+    # zusätzlich: gemeldete Pfad-MTU des Endpunkts im Routen-Cache
     case "$4" in *:*) ;; *) return 0 ;; esac
     c=$(ip -6 route get "$4" ${5:+mark $5} 2>/dev/null | sed -n 's/.* mtu \([0-9]*\).*/\1/p')
     [ -z "$c" ] || [ $(($3 + WG_OVERHEAD)) -le "$c" ]

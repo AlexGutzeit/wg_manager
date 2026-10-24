@@ -193,9 +193,12 @@ stellt sich nach einem Firmware-Update alles von selbst wieder her.
 
 - Freifunk-Franken-Firmware layer3-20241219 (OpenWrt 23.05.5) auf einem EdgeRouter X, Router hängt über Freifunk
   (Strecke 1412): Tunnel, Geräte, QR-Code, MTU.
-- layer3-20250321-beta (OpenWrt 24.10) auf einem TL-WR1043ND v2 mit DSL-Anschluss: Babel-Verbindung Seite A gegen
-  eine Test-Gegenstelle (WireGuard ohne Babel) – Verbindung, MTU-Suche (auch mit künstlicher Engstelle ohne
-  Rückmeldung), Wächter. Der Test mit zwei echten Routern (Seite B mit Babel) steht noch aus.
+- Babel-Verbindung zwischen zwei Routern mit layer3-20250321-beta (OpenWrt 24.10): Seite A TL-WR1043ND v2
+  (Uplink über einen Freifunk-WireGuard-Tunnel mit MTU 1412), Seite B TL-WDR4900 v1 hinter DSL (Telekom-IPv6).
+  Babel tauscht alle Routen aus; beide Seiten handeln 1332 aus (1412 − 80), volle Pakete gehen unzerlegt durch.
+  Außerdem: MTU-Suche gegen eine künstliche Engstelle ohne Rückmeldung (1400 → genau 1320), Wächter
+  (Selbstheilung nach entfernter bird-Datei, Neuaushandeln nach Adresswechsel, Erkennen einer verschwundenen
+  Gegenstelle), Löschen ohne Reste. Ein echter LTE-Anschluss ist noch nicht getestet.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
