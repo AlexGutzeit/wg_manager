@@ -36,9 +36,11 @@ version=$(sed -n 's/^#  Version \([0-9.]*\).*/\1/p' wg_manager | head -1)
 #           wg_manager migrate  übernimmt Tunnel, Geräte und Schlüssel –
 #                               an den Geräten muss nichts geändert werden
 #
-#  Neu: mehrere Tunnel (Netz+Internet / nur Netz / nur Internet für Gäste),
-#  QR-Code direkt im Terminal, MTU je Tunnel (wg_manager mtu-messen),
-#  übersteht Firmware-Updates. Nichts muss nachinstalliert werden.
+#  Kann: Gerätetunnel für Handy und Laptop (Netz+Internet / nur Netz /
+#  nur Internet für Gäste), QR-Code direkt im Terminal, MTU je Tunnel,
+#  Babel-Verbindungen zwischen Freifunk-Routern (babel-neu auf Router A,
+#  babel-einfuegen auf Router B, MTU wird ausgehandelt).
+#  Übersteht Firmware-Updates, nichts muss nachinstalliert werden.
 # =====================================================================
 cat << 'WG_MANAGER_ENDE' > /usr/sbin/wg_manager
 KOPF
