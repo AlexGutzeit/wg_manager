@@ -135,6 +135,20 @@ wg_manager babel-einfuegen          # fragt nach der Zeile
 ```
 
 Im Menü: `b` → `1` (konfigurieren) bzw. `b` → `2` (einfügen). Danach steht der Tunnel, Babel tauscht die Routen aus.
+Als Namen schlägt Seite B den Router A vor (`hbl-hoh-chrisb` → `hohchrisb`); ist er schon vergeben, wird eine
+Ziffer angehängt. Mit `--name N` lässt sich ein eigener Name setzen.
+
+**Mehrere Verbindungen:** Ein Router B kann Zeilen von mehreren Routern A einfügen, z. B. ein LTE-Router mit
+Verbindungen zu zwei Freifunk-Routern. Babel sieht dann zwei Nachbarn; fällt einer aus, laufen die Routen nach
+etwa 15–20 Sekunden über den anderen. Einen festen Hauptweg bekommt man über verschiedene rxcost (z. B. 16384 und
+20000).
+
+**Gerätetunnel auf Router B:** Handys und Laptops können sich auch mit Router B verbinden – über dessen feste
+Freifunk-Adresse, also durch den Babel-Tunnel (erreichbar, solange mindestens eine Babel-Verbindung steht). Das ist
+Tunnel im Tunnel: Hängt Router A hinter einem 1412er-Zugang, hat der Babel-Tunnel 1332, ein Gerätetunnel braucht
+aber mindestens 1280 + 80 = 1360. Die äußeren Pakete des Geräts werden dann zerlegt – das geht, ist aber weniger
+effizient, und manche Mobilfunknetze verwerfen zerlegte IPv6-Pakete. Wenn möglich, Geräte direkt mit Router A
+verbinden.
 
 **MTU aushandeln:** Beide Seiten starten mit 1280. Sobald sich die Router gefunden haben (WireGuard verbunden, die
 Gegenstelle antwortet), sucht jede Seite für ihre Senderichtung stufenweise die größte MTU zwischen 1280 und 1420:
@@ -208,8 +222,9 @@ stellt sich nach einem Firmware-Update alles von selbst wieder her.
   Babel tauscht alle Routen aus; beide Seiten handeln 1332 aus (1412 − 80), volle Pakete gehen unzerlegt durch.
   Außerdem: MTU-Suche gegen eine künstliche Engstelle ohne Rückmeldung (1400 → genau 1320), Wächter
   (Selbstheilung nach entfernter bird-Datei, Neuaushandeln nach Adresswechsel, Erkennen einer verschwundenen
-  Gegenstelle), rxcost ändern auf beiden Seiten ohne Tunnelabriss, Übernahme von rxcost über die Zeile, Löschen
-  ohne Reste. Ein echter LTE-Anschluss ist noch nicht getestet.
+  Gegenstelle), rxcost ändern auf beiden Seiten ohne Tunnelabriss, Übernahme von rxcost über die Zeile, zwei
+  Verbindungen auf einem Router B mit automatisch eindeutigen Namen, Löschen ohne Reste. Ein echter LTE-Anschluss
+  und zwei verschiedene Router A für einen Router B sind noch nicht getestet.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 

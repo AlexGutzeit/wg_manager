@@ -593,6 +593,19 @@ snip_field() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
 valid_key() { echo "$1" | grep -qE '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$'; }
 valid_rxcost() { echo "$1" | grep -qE '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
+babel_name_from_host() { # hbl-hoh-chrisb -> hohchrisb (letzte zwei Teile, nur a-z0-9, höchstens 12 Zeichen)
+    echo "$1" | tr 'A-Z' 'a-z' | awk -F- '{ s = (NF >= 2) ? $(NF-1) $NF : $NF; gsub(/[^a-z0-9]/, "", s); print substr(s, 1, 12) }'
+}
+babel_free_name() { # name -> name, oder name2, name3 … wenn schon vergeben
+    local base=$1 c=$1 n=2
+    while uci -q get $CFG.b_$c >/dev/null || uci -q get network.bb_$c >/dev/null; do
+        [ $n -gt 9 ] && break
+        c="$(echo "$base" | cut -c1-11)$n"
+        n=$((n + 1))
+    done
+    echo "$c"
+}
+
 cmd_babel_show() { # name: Zeile zum Einfügen (nur Seite A)
     local b=$1 ep
     uci -q get $CFG.b_$b >/dev/null || die "Babel-Verbindung $b gibt es nicht"
@@ -674,7 +687,10 @@ cmd_babel_insert() { # ["zeile"] [--name N] [--rxcost N]  – Seite B
     valid_key "$pub" && valid_key "$key" && valid_key "$psk" || die "Schlüssel in der Zeile unvollständig – beim Kopieren abgeschnitten?"
     [ -n "$host" ] && echo "$port" | grep -qE '^[0-9]+$' || die "Ziel (ep=…) in der Zeile fehlerhaft."
     if [ -z "$name" ]; then
-        name=$(snip_field "$line" name)
+        # Vorschlag nach dem Router A (bei mehreren Verbindungen auf B eindeutig), sonst der Name auf A
+        name=$(babel_name_from_host "$(snip_field "$line" von)")
+        valid_tunnel_name "$name" || name=$(snip_field "$line" name)
+        name=$(babel_free_name "$name")
         if [ -t 0 ]; then
             printf "Name der Verbindung auf diesem Router [%s]: " "$name"; read -r i; [ -n "$i" ] && name=$i
         fi
