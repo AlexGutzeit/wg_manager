@@ -1,7 +1,7 @@
 #!/bin/sh
 # ============================================================================
 #  wg_manager – WireGuard-Zugänge auf Freifunk-Franken-Routern (Layer3)
-#  Version 2.3 (24.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern; MTU je Tunnel; QR-Code eingebaut
+#  Version 2.3 (25.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern; MTU je Tunnel; QR-Code eingebaut
 #
 #  Alle Einstellungen stehen in /etc/config/wgmanager (Tunnel + Geräte).
 #  Daraus erzeugt "wg_manager apply" bei jedem Start:
@@ -591,6 +591,7 @@ babel_routes() { # ifn -> Zahl der per Babel gelernten Routen über diese Schnit
 
 snip_field() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
 valid_key() { echo "$1" | grep -qE '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$'; }
+valid_rxcost() { echo "$1" | grep -qE '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
 cmd_babel_show() { # name: Zeile zum Einfügen (nur Seite A)
     local b=$1 ep
@@ -599,7 +600,7 @@ cmd_babel_show() { # name: Zeile zum Einfügen (nur Seite A)
     [ -s "$(bget $b peerkeyfile)" ] || die "Schlüssel der Gegenseite fehlt – Verbindung neu anlegen."
     ep=$(endpoint_addr)
     case "$ep" in *:*) ep="[$ep]" ;; esac
-    echo "$SNIP_TAG name=$b von=$(uci -q get fff.system.hostname || hostname) ep=$ep:$(bget $b port) pub=$(wg pubkey < "$(bget $b keyfile)") key=$(cat "$(bget $b peerkeyfile)") psk=$(cat "$(bget $b pskfile)")"
+    echo "$SNIP_TAG name=$b von=$(uci -q get fff.system.hostname || hostname) ep=$ep:$(bget $b port) rx=$(bget $b rxcost) pub=$(wg pubkey < "$(bget $b keyfile)") key=$(cat "$(bget $b peerkeyfile)") psk=$(cat "$(bget $b pskfile)")"
 }
 
 babel_checks() { # gemeinsame Voraussetzungen
@@ -621,7 +622,7 @@ cmd_babel_add() { # name [--port N] [--rxcost N]  – Seite A
     valid_tunnel_name "$name" || die "Name: 1–12 Zeichen a-z, 0-9"
     uci -q get $CFG.b_$name >/dev/null && die "Babel-Verbindung $name gibt es schon"
     uci -q get network.bb_$name >/dev/null && die "network.bb_$name existiert bereits"
-    echo "$rx" | grep -qE '^[0-9]+$' || die "rxcost: Zahl"
+    valid_rxcost "$rx" || die "rxcost: 1–65535"
     babel_checks
     [ -n "$(endpoint_addr)" ] || die "Keine feste Freifunk-IPv6 gefunden (router_ip6 oder Client-Netz) – Seite A muss erreichbar sein."
     [ -n "$port" ] || port=$(next_free_port)
@@ -652,7 +653,7 @@ EOF
 }
 
 cmd_babel_insert() { # ["zeile"] [--name N] [--rxcost N]  – Seite B
-    local line="" name="" rx=$BABEL_RXCOST ep host port pub key psk i
+    local line="" name="" rx="" ep host port pub key psk i
     while [ $# -gt 0 ]; do
         case "$1" in
             --name) name="$2"; shift ;;
@@ -672,13 +673,19 @@ cmd_babel_insert() { # ["zeile"] [--name N] [--rxcost N]  – Seite B
     host=$(ep_host "$ep"); port=$(ep_port "$ep")
     valid_key "$pub" && valid_key "$key" && valid_key "$psk" || die "Schlüssel in der Zeile unvollständig – beim Kopieren abgeschnitten?"
     [ -n "$host" ] && echo "$port" | grep -qE '^[0-9]+$' || die "Ziel (ep=…) in der Zeile fehlerhaft."
-    echo "$rx" | grep -qE '^[0-9]+$' || die "rxcost: Zahl"
     if [ -z "$name" ]; then
         name=$(snip_field "$line" name)
         if [ -t 0 ]; then
             printf "Name der Verbindung auf diesem Router [%s]: " "$name"; read -r i; [ -n "$i" ] && name=$i
         fi
     fi
+    # rxcost: Angabe > Wert von Seite A aus der Zeile > Standard; beide Seiten sollten gleich sein
+    if [ -z "$rx" ]; then
+        rx=$(snip_field "$line" rx)
+        valid_rxcost "$rx" || rx=$BABEL_RXCOST
+        [ -t 0 ] && rx=$(choose_rxcost "$rx")
+    fi
+    valid_rxcost "$rx" || die "rxcost: 1–65535"
     valid_tunnel_name "$name" || die "Name: 1–12 Zeichen a-z, 0-9"
     uci -q get $CFG.b_$name >/dev/null && die "Babel-Verbindung $name gibt es schon"
     uci -q get network.bb_$name >/dev/null && die "network.bb_$name existiert bereits"
@@ -719,6 +726,29 @@ EOF
     else
         warn "Noch keine Verbindung. Prüfen: Hat dieser Router IPv6 am Anschluss? Ist Port $port auf Router A erreichbar? Der Wächter versucht es weiter; Stand: wg_manager liste"
     fi
+}
+
+cmd_babel_edit() { # name --rxcost N  (beide Seiten)
+    local b=$1 rx="" old
+    shift
+    uci -q get $CFG.b_$b >/dev/null || die "Babel-Verbindung $b gibt es nicht"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --rxcost) rx="$2"; shift ;;
+            *) die "Unbekannte Option $1" ;;
+        esac
+        shift
+    done
+    [ -n "$rx" ] || die "Nichts zu ändern (Option: --rxcost N)"
+    valid_rxcost "$rx" || die "rxcost: 1–65535"
+    old=$(bget $b rxcost)
+    [ "$rx" = "$old" ] && { say "rxcost von $b ist schon $rx."; return 0; }
+    uci set $CFG.b_$b.rxcost="$rx"
+    uci commit $CFG
+    ok "Babel-Verbindung $b: rxcost $old → $rx."
+    cmd_apply
+    say "rxcost gilt für die Empfangsrichtung dieses Routers. Auf dem anderen Router ($( [ "$(bget $b role)" = a ] && echo "Seite B" || echo "Seite A, $(bget $b von)")) genauso einstellen:"
+    say "  wg_manager babel-aendern <name dort> --rxcost $rx"
 }
 
 frag6() { awk '/^Ip6FragCreates/{print $2}' /proc/net/snmp6 2>/dev/null; }
@@ -1342,9 +1372,9 @@ cmd_list() {
         say "  $t ($ifn, $st)"
         if babel_connected "$ifn"; then
             ep=$(babel_reach "$ifn" "$(babel_peer_ll $t)" && echo ja || echo nein)
-            say "    ${GREEN}verbunden${NC} (zuletzt $(ago ${hs:-0}))   Gegenstelle antwortet: $ep   Babel-Routen: $(babel_routes "$ifn")   MTU: $(bget $t mtu)"
+            say "    ${GREEN}verbunden${NC} (zuletzt $(ago ${hs:-0}))   Gegenstelle antwortet: $ep   Babel-Routen: $(babel_routes "$ifn")   MTU: $(bget $t mtu)   rxcost: $(bget $t rxcost)"
         else
-            say "    ${RED}nicht verbunden${NC} (zuletzt $(ago ${hs:-0}))   MTU: $(bget $t mtu)"
+            say "    ${RED}nicht verbunden${NC} (zuletzt $(ago ${hs:-0}))   MTU: $(bget $t mtu)   rxcost: $(bget $t rxcost)"
         fi
     done
 }
@@ -1517,19 +1547,32 @@ menu_tunnel_edit() {
     esac
 }
 
+choose_rxcost() { # vorschlag -> Wert (Dialog auf stderr)
+    local r
+    echo "rxcost = Babel-Kosten dieses Tunnels (1–65535), auf beiden Routern gleich einstellen:" >&2
+    echo "  16384 = nur Ersatzweg, solange es andere Verbindungen gibt (wie die Firmware-Tunnel)." >&2
+    echo "  Ist der Tunnel der einzige Weg (Router hinter LTE), ist der Wert praktisch egal." >&2
+    echo "  Kleiner (z. B. 1024) = Tunnel wird bevorzugt. Babel addiert die Kosten; ab 65535 gilt ein Ziel als" >&2
+    echo "  unerreichbar – hintereinander geschaltete Tunnel brauchen kleinere Werte." >&2
+    printf "rxcost [%s]: " "$1" >&2; read -r r
+    echo "${r:-$1}"
+}
+
 menu_babel() {
-    local c b name
+    local c b name rx
     echo "Babel-Verbindungen – zwei Freifunk-Router über WireGuard und Babel koppeln"
     echo "  1) Babel-Tunnel konfigurieren (dieser Router lauscht, gibt eine Zeile zum Einfügen aus)"
     echo "  2) Babel-Tunnel einfügen (Zeile vom anderen Router)"
-    echo "  3) Zeile erneut anzeigen   4) MTU neu aushandeln   5) Babel-Tunnel löschen"
+    echo "  3) Zeile erneut anzeigen   4) MTU neu aushandeln   5) Babel-Tunnel löschen   6) rxcost ändern"
     printf "Auswahl: "; read -r c
     case "$c" in
-        1) printf "Name der Verbindung (a-z, 0-9, max. 12, z. B. lte1): "; read -r name; ( cmd_babel_add "$name" ) ;;
+        1) printf "Name der Verbindung (a-z, 0-9, max. 12, z. B. lte1): "; read -r name
+           rx=$(choose_rxcost $BABEL_RXCOST); ( cmd_babel_add "$name" --rxcost "$rx" ) ;;
         2) ( cmd_babel_insert ) ;;
         3) b=$(choose_from "Welche Verbindung?" "$(for b in $(babels); do [ "$(bget $b role)" = a ] && echo $b; done)") && ( cmd_babel_show "$b" ) ;;
         4) b=$(choose_from "Welche Verbindung?" "$(babels)") && ( cmd_babel_mtu "$b" ) ;;
         5) b=$(choose_from "Welche Verbindung löschen?" "$(babels)") && { printf "%s wirklich löschen? [j/N]: " "$b"; read -r c; [ "$c" = j ] && ( cmd_babel_del "$b" ); } ;;
+        6) b=$(choose_from "Welche Verbindung?" "$(babels)") && ( cmd_babel_edit "$b" --rxcost "$(choose_rxcost "$(bget $b rxcost)")" ) ;;
     esac
 }
 
@@ -1591,6 +1634,7 @@ Babel-Verbindungen (zwei Freifunk-Router koppeln, z. B. einen Router hinter LTE)
                                      Seite B: Zeile von A einfügen (ohne Angabe: wird abgefragt), verbindet sich
   babel-zeige <name>                 Zeile erneut ausgeben (Seite A)
   babel-mtu <name>                   MTU jetzt neu aushandeln
+  babel-aendern <name> --rxcost N    Babel-Kosten ändern (1–65535, beide Seiten; auf dem anderen Router gleich einstellen)
   babel-loeschen <name>
   babel-pruefen [-q]                 Wächter (cron, alle 5 min): stellt Fehlendes wieder her, handelt die MTU aus
   migrate [--dns "..."]              Altbestand (wg_manager v1/privwg) übernehmen
@@ -1628,6 +1672,7 @@ case "$1" in
             babel-neu) cmd_babel_add "$@" ;;
             babel-einfuegen) cmd_babel_insert "$@" ;;
             babel-mtu) cmd_babel_mtu "$1" ;;
+            babel-aendern) cmd_babel_edit "$@" ;;
             babel-loeschen) cmd_babel_del "$1" ;;
             babel-pruefen) cmd_babel_check ;;
             *) usage; exit 1 ;;

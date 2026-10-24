@@ -89,6 +89,7 @@ ssh root@<router> wg_manager zeige Laptop_Anna --raw > laptop.conf
 | `babel-einfuegen ["<zeile>"] [--name N]` | Babel-Verbindung, Seite B: Zeile von A einfügen, verbindet sich |
 | `babel-zeige <name>` | Zeile erneut ausgeben (Seite A) |
 | `babel-mtu <name>` | MTU jetzt neu aushandeln |
+| `babel-aendern <name> --rxcost N` | Babel-Kosten nachträglich ändern (Seite A und B) |
 | `babel-loeschen <name>` | Babel-Verbindung entfernen |
 | `babel-pruefen` | Wächter (läuft alle 5 min von selbst) |
 | `apply` | alles aus `/etc/config/wgmanager` neu anwenden (reparieren) |
@@ -125,7 +126,7 @@ Gateway-Server. Auf beiden Routern muss wg_manager (ab 2.3) installiert sein.
 wg_manager babel-neu lte1
 ```
 
-Ausgegeben wird **eine Zeile**, etwa `wgm-babel1 name=lte1 von=<router-a> ep=[2a0b:…]:51821 pub=… key=… psk=…`.
+Ausgegeben wird **eine Zeile**, etwa `wgm-babel1 name=lte1 von=<router-a> ep=[2a0b:…]:51821 rx=16384 pub=… key=… psk=…`.
 
 **Seite B** (verbindet sich, z. B. hinter LTE) – Zeile einfügen:
 
@@ -142,6 +143,16 @@ wurde. Hin- und Rückweg können verschieden sein (z. B. bei LTE). Ein Wächter 
 die Verbindung weg war oder sich die Adresse der Gegenstelle ändert, und prüft stündlich, ob die MTU noch passt.
 Von Hand: `wg_manager babel-mtu <name>`.
 
+**rxcost (Babel-Kosten des Tunnels, 1–65535):** Standard 16384 wie bei den Firmware-Tunneln – der Tunnel ist dann nur
+Ersatzweg, solange es andere Verbindungen gibt. Ist er der einzige Weg (Router hinter LTE), ist der Wert praktisch
+egal. Kleinere Werte (z. B. 1024) lassen Babel den Tunnel bevorzugen. Babel addiert die Kosten entlang eines Weges und
+hält ein Ziel ab 65535 für unerreichbar – hintereinander geschaltete Tunnel brauchen kleinere Werte.
+
+- Beim Anlegen: `--rxcost N` bzw. im Menü abgefragt. Die Zeile von A trägt deren Wert (`rx=`) mit, B übernimmt ihn,
+  solange beim Einfügen nichts anderes angegeben wird.
+- Nachträglich auf beiden Seiten: `wg_manager babel-aendern <name> --rxcost N` (Menü `b` → `6`). Der Tunnel bleibt
+  stehen, nur bird wird neu geladen. rxcost gilt für die Empfangsrichtung – auf beiden Routern gleich einstellen.
+
 **Voraussetzungen**
 
 - Seite A ist über ihre feste Freifunk-IPv6 erreichbar. Die IPv6 des DSL-/LTE-Anbieters wird bewusst nie benutzt
@@ -154,8 +165,7 @@ Von Hand: `wg_manager babel-mtu <name>`.
 **Technik**
 
 - Schnittstelle `bb_<name>` (nicht `wg_…`: die Layer-3-Skripte der Firmware löschen `wg_`-Schnittstellen ohne
-  eigenen gateway-Eintrag), Link-Local `fe80::1` (A) und `fe80::2` (B) plus die Router-IP, `rxcost` 16384 wie bei
-  den Firmware-Tunneln (`--rxcost N`).
+  eigenen gateway-Eintrag), Link-Local `fe80::1` (A) und `fe80::2` (B) plus die Router-IP.
 - Babel: eine Datei je Verbindung in `/etc/bird/fff/babelpeers/`; bird wird erst nach erfolgreicher Prüfung
   (`bird -p`) neu geladen.
 - B markiert seine Tunnelpakete (`fwmark 0xc8`, wie die Firmware), damit sie über den eigenen Anschluss gehen und
@@ -198,7 +208,8 @@ stellt sich nach einem Firmware-Update alles von selbst wieder her.
   Babel tauscht alle Routen aus; beide Seiten handeln 1332 aus (1412 − 80), volle Pakete gehen unzerlegt durch.
   Außerdem: MTU-Suche gegen eine künstliche Engstelle ohne Rückmeldung (1400 → genau 1320), Wächter
   (Selbstheilung nach entfernter bird-Datei, Neuaushandeln nach Adresswechsel, Erkennen einer verschwundenen
-  Gegenstelle), Löschen ohne Reste. Ein echter LTE-Anschluss ist noch nicht getestet.
+  Gegenstelle), rxcost ändern auf beiden Seiten ohne Tunnelabriss, Übernahme von rxcost über die Zeile, Löschen
+  ohne Reste. Ein echter LTE-Anschluss ist noch nicht getestet.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
@@ -215,8 +226,9 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
-- **2.3** (24.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern (`babel-neu`, `babel-einfuegen`, MTU wird
-  ausgehandelt, Wächter); Endpunkt nur noch feste Freifunk-IPv6, nie die Adresse des WAN-Anschlusses.
+- **2.3** (25.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern (`babel-neu`, `babel-einfuegen`, MTU wird
+  ausgehandelt, rxcost einstellbar und nachträglich änderbar, Wächter); Endpunkt nur noch feste Freifunk-IPv6, nie
+  die Adresse des WAN-Anschlusses.
 - **2.2** (23.10.2026) – MTU je Tunnel einstellbar und messbar (`--mtu`, `mtu-messen`); Einrückung mit Leerzeichen
   (Einfügen in die SSH-Sitzung).
 - **2.1** (23.10.2026) – QR-Code im Terminal ohne Zusatzpakete; Sperre wird bei Abbruch freigegeben.
