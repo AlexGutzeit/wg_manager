@@ -1,13 +1,14 @@
 #!/bin/sh
 # ============================================================================
 #  wg_manager – WireGuard-Zugänge auf Freifunk-Franken-Routern (Layer3)
-#  Version 2.2 (23.10.2026) – MTU je Tunnel einstellbar/messbar; QR-Code eingebaut (ohne Zusatzpakete)
+#  Version 2.3 (24.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern; MTU je Tunnel; QR-Code eingebaut
 #
 #  Alle Einstellungen stehen in /etc/config/wgmanager (Tunnel + Geräte).
 #  Daraus erzeugt "wg_manager apply" bei jedem Start:
 #    - die WireGuard-Schnittstellen und Geräte in /etc/config/network
 #    - die Routing-Regeln (als uci-Regeln, von netifd verwaltet)
 #    - die Firewall-Regeln (Block in /etc/nftables-fff.conf, lädt fff-firewall)
+#    - für Babel-Verbindungen (Router <-> Router) zusätzlich die bird-Dateien in /etc/bird/fff/babelpeers
 #  Schlüssel liegen in /etc/wireguard. Konfiguration, Schlüssel und dieses Skript
 #  stehen in /etc/sysupgrade.conf und überstehen so ein Firmware-Update; danach
 #  stellt der Start-Aufruf in /etc/rc.local.fff_userconfig alles wieder her.
@@ -46,6 +47,18 @@ MTU_DEFAULT=1280
 WG_OVERHEAD=80
 MTU_ZIEL=2620:fe::fe   # Ziel für die Messung (Quad9 über IPv6)
 
+# Babel-Verbindungen (zwei Freifunk-Router über WireGuard + Babel koppeln, z. B. ein Router hinter LTE):
+# Seite A lauscht auf ihrer festen Freifunk-IPv6 und erzeugt eine Zeile zum Einfügen, Seite B fügt sie ein
+# und verbindet sich. Schnittstellen heißen bb_<name> – NICHT wg_<name>: die Layer-3-Skripte der Firmware
+# löschen jede wg_-Schnittstelle ohne eigenen gateway-Eintrag.
+BABEL_RXCOST=16384     # wie die Firmware bei wireguardpeer
+BIRD_DIR=/etc/bird/fff/babelpeers
+BABEL_STATE=/tmp/wg_manager
+SNIP_TAG=wgm-babel1
+MICRON_DIR=/usr/lib/micron.d
+CRON_FILE=/etc/crontabs/root
+CRON_LINE="*/5 * * * * /usr/sbin/wg_manager babel-pruefen -q"
+
 QUIET=0
 
 if [ -t 1 ]; then
@@ -83,6 +96,8 @@ peers()   { # [tunnel]
 }
 tget() { uci -q get $CFG.t_$1.$2; }
 pget() { uci -q get $CFG.p_$1.$2; }
+babels() { uci -q show $CFG | sed -n "s/^$CFG\.b_\([^.=]*\)=babel$/\1/p"; }
+bget() { uci -q get $CFG.b_$1.$2; }
 
 fff_table() { awk '$2=="fff"{print $1}' /etc/iproute2/rt_tables 2>/dev/null | head -1; }
 
@@ -193,6 +208,97 @@ set network.wgm_${t}_in6.lookup='$tab'
 set network.wgm_${t}_in6.priority='31'
 EOF
     done
+    stage_babel "$tab"
+}
+
+peer_ip4() { # Router-IPv4 für Babel (wie babel_add_peeraddr der Firmware)
+    local ip
+    ip=$(uci -q get gateway.@gateway[0].peer_ip) || ip=$(uci -q get gateway.meta.router_ip) \
+        || ip=$(uci -q get gateway.@client[0].ipaddr) || return 1
+    ip=${ip%% *}
+    echo "${ip%%/*}"
+}
+babel_ll()      { [ "$(bget $1 role)" = a ] && echo fe80::1 || echo fe80::2; }   # eigene Link-Local im Tunnel
+babel_peer_ll() { [ "$(bget $1 role)" = a ] && echo fe80::2 || echo fe80::1; }   # die der Gegenstelle
+
+stage_babel() { # tabelle
+    local tab=$1 b ifn key psk p ip4 ip6
+    ip4=$(peer_ip4)
+    ip6=$(uci -q get gateway.@gateway[0].peer_ip6)
+    for b in $(babels); do
+        ifn=$(bget $b ifname)
+        key=$(bget $b keyfile)
+        [ -s "$key" ] || { warn "Schlüssel $key für Babel-Verbindung $b fehlt – übersprungen"; continue; }
+        uci -q delete network.$ifn
+        for p in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=wireguard_$ifn$/\1/p"); do
+            uci -q delete network.$p
+        done
+        uci batch <<EOF
+set network.$ifn=interface
+set network.$ifn.proto='wireguard'
+set network.$ifn.private_key='$(tr -d '\n' < "$key")'
+set network.$ifn.mtu='$(bget $b mtu)'
+set network.$ifn.nohostroute='1'
+add_list network.$ifn.addresses='$(babel_ll $b)/64'
+set network.bb_peer_$b=wireguard_$ifn
+set network.bb_peer_$b.public_key='$(bget $b peer_public_key)'
+add_list network.bb_peer_$b.allowed_ips='::/0'
+add_list network.bb_peer_$b.allowed_ips='0.0.0.0/0'
+set network.wgm_bb_${b}_in4=rule
+set network.wgm_bb_${b}_in4.in='$ifn'
+set network.wgm_bb_${b}_in4.lookup='$tab'
+set network.wgm_bb_${b}_in4.priority='31'
+set network.wgm_bb_${b}_in6=rule6
+set network.wgm_bb_${b}_in6.in='$ifn'
+set network.wgm_bb_${b}_in6.lookup='$tab'
+set network.wgm_bb_${b}_in6.priority='31'
+EOF
+        [ -n "$ip4" ] && uci add_list network.$ifn.addresses="$ip4"
+        [ -n "$ip6" ] && uci add_list network.$ifn.addresses="$ip6"
+        psk=$(bget $b pskfile)
+        [ -n "$psk" ] && [ -s "$psk" ] && uci set network.bb_peer_$b.preshared_key="$(tr -d '\n' < "$psk")"
+        if [ "$(bget $b role)" = a ]; then
+            uci set network.$ifn.listen_port="$(bget $b port)"
+            # Platzhalter, bis sich B meldet (WireGuard übernimmt dann dessen Adresse): ohne Ziel meldet
+            # bird für jedes Babel-Hallo "Destination address required" und füllt das Systemprotokoll
+            uci set network.bb_peer_$b.endpoint_host='::1'
+            uci set network.bb_peer_$b.endpoint_port='9'
+        else
+            # Seite B: Tunnelpakete über den eigenen Anschluss (main), nicht über die per Babel gelernten Routen
+            uci set network.$ifn.fwmark='0xc8'
+            uci set network.bb_peer_$b.endpoint_host="$(bget $b endpoint_host)"
+            uci set network.bb_peer_$b.endpoint_port="$(bget $b endpoint_port)"
+            uci set network.bb_peer_$b.persistent_keepalive="$(bget $b keepalive)"
+        fi
+    done
+}
+
+# bird: je Babel-Verbindung eine Datei in $BIRD_DIR (wie 50-wireguard der Firmware). Die Layer-3-Skripte
+# erzeugen den Ordner bei jedem Lauf neu – fehlende Dateien stellt "babel-pruefen" wieder her.
+write_bird() { # Rückgabe 0 = geändert
+    local b f want changed=1
+    [ -d /etc/bird/fff ] || return 1
+    mkdir -p $BIRD_DIR
+    for b in $(babels); do
+        f=$BIRD_DIR/$(bget $b ifname).conf
+        want="interface \"$(bget $b ifname)\" { type wired; rxcost $(bget $b rxcost); };"
+        [ "$(cat "$f" 2>/dev/null)" = "$want" ] || { echo "$want" > "$f"; changed=0; }
+    done
+    for f in $BIRD_DIR/bb_*.conf; do
+        [ -f "$f" ] || continue
+        b=${f##*/bb_}; b=${b%.conf}
+        uci -q get $CFG.b_$b >/dev/null || { rm -f "/etc/bird/fff/babelpeers/bb_$b.conf"; changed=0; }
+    done
+    return $changed
+}
+reload_bird() {
+    [ -d /tmp/bird/fff ] && warn "Firmware ist gerade im Testmodus (/tmp/bird/fff) – Babel-Verbindungen greifen erst danach."
+    if ! bird -p -c /etc/bird.conf 2>/tmp/wg_manager.bird.err; then
+        cat /tmp/wg_manager.bird.err >&2
+        rm -f /etc/bird/fff/babelpeers/bb_*.conf
+        die "bird-Konfiguration fehlerhaft – Babel-Dateien wieder entfernt, bird NICHT neu geladen"
+    fi
+    /etc/init.d/fff-bird reload
 }
 
 nft_block() {
@@ -200,6 +306,7 @@ nft_block() {
     # alle Client-Netze des Routers (für "nur Internet"/fremde Netze sperren)
     local6=$(nets_detect | awk -F'|' '{print $4}' | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
     for t in $(tunnels); do ports="$ports${ports:+, }$(tget $t port)"; done
+    for t in $(babels); do [ "$(bget $t role)" = a ] && ports="$ports${ports:+, }$(bget $t port)"; done
 
     echo "$NFT_BEGIN"
     echo "table inet wg_manager {"
@@ -220,8 +327,7 @@ nft_block() {
     # als 1500 ist und manche Server die Meldung „Paket zu groß“ nicht beachten (z. B. microsoft.com)
     mss=$(uci -q get $CFG.settings.mss_clamp_all)
     [ -n "$mss" ] && echo "        tcp flags syn tcp option maxseg size set $mss comment \"alle Verbindungen (mss_clamp_all)\""
-    for t in $(tunnels); do
-        ifn=$(tget $t ifname)
+    for ifn in $(for t in $(tunnels); do tget $t ifname; done; for t in $(babels); do bget $t ifname; done); do
         echo "        oifname \"$ifn\" tcp flags syn tcp option maxseg size set rt mtu"
         echo "        iifname \"$ifn\" tcp flags syn tcp option maxseg size set rt mtu"
     done
@@ -318,6 +424,34 @@ ensure_persistence() {
     done
     [ -f "$USERCONFIG" ] || printf '#!/bin/sh\n' > "$USERCONFIG"
     grep -qF '/usr/sbin/wg_manager apply' "$USERCONFIG" || echo "$BOOT_LINE" >> "$USERCONFIG"
+    ensure_cron
+}
+
+# Wächter für Babel-Verbindungen (MTU aushandeln, Selbstheilung) – nur solange es welche gibt.
+# Die Freifunk-Firmware nutzt micrond mit einer Datei je Aufgabe in /usr/lib/micron.d (kein /etc/crontabs);
+# ohne diesen Ordner (OpenWrt-cron) eine Zeile in /etc/crontabs/root.
+cron_restart() { /etc/init.d/micrond restart >/dev/null 2>&1 || /etc/init.d/cron restart >/dev/null 2>&1; }
+ensure_cron() {
+    local changed=0
+    # alte Ablage aus der ersten Testfassung aufräumen, wenn es micron.d gibt
+    if [ -d "$MICRON_DIR" ] && grep -qF 'wg_manager babel-pruefen' "$CRON_FILE" 2>/dev/null; then
+        sed -i '/wg_manager babel-pruefen/d' "$CRON_FILE"
+        [ -s "$CRON_FILE" ] || rm -f "/etc/crontabs/root"
+        changed=1
+    fi
+    if [ -d "$MICRON_DIR" ]; then
+        if [ -n "$(babels)" ]; then
+            [ "$(cat "$MICRON_DIR/wg_manager" 2>/dev/null)" = "$CRON_LINE" ] || { echo "$CRON_LINE" > "$MICRON_DIR/wg_manager"; changed=1; }
+        elif [ -f "$MICRON_DIR/wg_manager" ]; then
+            rm -f "/usr/lib/micron.d/wg_manager"; changed=1
+        fi
+    elif [ -n "$(babels)" ]; then
+        grep -qF 'wg_manager babel-pruefen' "$CRON_FILE" 2>/dev/null || { mkdir -p "${CRON_FILE%/*}"; echo "$CRON_LINE" >> "$CRON_FILE"; changed=1; }
+    elif grep -qF 'wg_manager babel-pruefen' "$CRON_FILE" 2>/dev/null; then
+        sed -i '/wg_manager babel-pruefen/d' "$CRON_FILE"; changed=1
+    fi
+    [ $changed = 1 ] && cron_restart
+    return 0
 }
 
 # Fingerabdruck der network-Einträge eines Tunnels (Schnittstelle + Geräte)
@@ -329,10 +463,11 @@ tunnel_sig() {
 }
 
 cmd_apply() {
-    local before after fw_changed=0 net_changed=0 t ifn
+    local before after fw_changed=0 net_changed=0 bird_changed=0 t ifn
     ensure_env
     before=$(uci -q show network | sort | md5sum)
     for t in $(tunnels); do eval "sig_$t=$(tunnel_sig "$(tget $t ifname)")"; done
+    for t in $(babels); do eval "bsig_$t=$(tunnel_sig "$(bget $t ifname)")"; done
     stage_network
     after=$(uci -q show network | sort | md5sum)
     if [ "$before" != "$after" ]; then
@@ -345,6 +480,10 @@ cmd_apply() {
             ifn=$(tget $t ifname)
             [ "$(eval echo \$sig_$t)" = "$(tunnel_sig "$ifn")" ] || ifup "$ifn"
         done
+        for t in $(babels); do
+            ifn=$(bget $t ifname)
+            [ "$(eval echo \$bsig_$t)" = "$(tunnel_sig "$ifn")" ] || ifup "$ifn"
+        done
         sleep 3
     else
         uci -q revert network
@@ -354,8 +493,12 @@ cmd_apply() {
     if [ $fw_changed = 1 ] || [ $net_changed = 1 ] || ! nft list table inet wg_manager >/dev/null 2>&1; then
         /etc/init.d/fff-firewall restart
     fi
+    if write_bird || { [ $net_changed = 1 ] && [ -n "$(babels)" ]; }; then
+        reload_bird
+        bird_changed=1
+    fi
     ensure_persistence
-    ok "Angewendet (Netz $( [ $net_changed = 1 ] && echo neu geladen || echo unverändert ), Firewall $( [ $fw_changed = 1 ] && echo neu || echo unverändert ))."
+    ok "Angewendet (Netz $( [ $net_changed = 1 ] && echo neu geladen || echo unverändert ), Firewall $( [ $fw_changed = 1 ] && echo neu || echo unverändert )$( [ $bird_changed = 1 ] && echo ", bird neu geladen"))."
 }
 
 # ---------------------------------------------------------------------------
@@ -425,6 +568,269 @@ cmd_mtu_check() { # [ziel]
     done
 }
 
+# ---------------------------------------------------------------------------
+#  Babel-Verbindungen (Router <-> Router)
+# ---------------------------------------------------------------------------
+
+log() { logger -t wg_manager "$*" 2>/dev/null; }
+
+ep_host() { # "[addr]:port" oder "addr:port" -> addr
+    case "$1" in \[*) echo "$1" | sed 's/^\[\(.*\)\]:[0-9]*$/\1/' ;; *) echo "${1%:*}" ;; esac
+}
+ep_port() { echo "${1##*:}"; }
+babel_peer_ep() { wg show "$1" endpoints 2>/dev/null | awk '$2!="(none)"{print $2}' | head -1; }
+babel_hs() { wg show "$1" latest-handshakes 2>/dev/null | awk '{print $2}' | head -1; }
+babel_connected() { # ifn -> 0, wenn der letzte Handshake jünger als 3 Minuten ist
+    local hs=$(babel_hs "$1")
+    [ -n "$hs" ] && [ "$hs" -gt 0 ] && [ $(( $(date +%s) - hs )) -lt 180 ]
+}
+babel_reach() { ping -6 -c "${3:-1}" -W 2 -I "$1" "$2" >/dev/null 2>&1; }
+babel_routes() { # ifn -> Zahl der per Babel gelernten Routen über diese Schnittstelle
+    { ip -6 route show table all dev "$1"; ip -4 route show table all dev "$1"; } 2>/dev/null | grep -c 'proto bird'
+}
+
+snip_field() { echo "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
+valid_key() { echo "$1" | grep -qE '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$'; }
+
+cmd_babel_show() { # name: Zeile zum Einfügen (nur Seite A)
+    local b=$1 ep
+    uci -q get $CFG.b_$b >/dev/null || die "Babel-Verbindung $b gibt es nicht"
+    [ "$(bget $b role)" = a ] || die "$b ist Seite B – die Zeile gibt es nur auf Seite A."
+    [ -s "$(bget $b peerkeyfile)" ] || die "Schlüssel der Gegenseite fehlt – Verbindung neu anlegen."
+    ep=$(endpoint_addr)
+    case "$ep" in *:*) ep="[$ep]" ;; esac
+    echo "$SNIP_TAG name=$b von=$(uci -q get fff.system.hostname || hostname) ep=$ep:$(bget $b port) pub=$(wg pubkey < "$(bget $b keyfile)") key=$(cat "$(bget $b peerkeyfile)") psk=$(cat "$(bget $b pskfile)")"
+}
+
+babel_checks() { # gemeinsame Voraussetzungen
+    command -v bird >/dev/null && [ -d /etc/bird/fff ] || die "Diese Firmware hat kein bird/Babel (/etc/bird/fff fehlt)."
+    peer_ip4 >/dev/null || warn "Keine Router-IPv4 gefunden – Babel läuft dann nur über IPv6."
+}
+
+cmd_babel_add() { # name [--port N] [--rxcost N]  – Seite A
+    local name="$1" port="" rx=$BABEL_RXCOST
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port) port="$2"; shift ;;
+            --rxcost) rx="$2"; shift ;;
+            *) die "Unbekannte Option $1" ;;
+        esac
+        shift
+    done
+    valid_tunnel_name "$name" || die "Name: 1–12 Zeichen a-z, 0-9"
+    uci -q get $CFG.b_$name >/dev/null && die "Babel-Verbindung $name gibt es schon"
+    uci -q get network.bb_$name >/dev/null && die "network.bb_$name existiert bereits"
+    echo "$rx" | grep -qE '^[0-9]+$' || die "rxcost: Zahl"
+    babel_checks
+    [ -n "$(endpoint_addr)" ] || die "Keine feste Freifunk-IPv6 gefunden (router_ip6 oder Client-Netz) – Seite A muss erreichbar sein."
+    [ -n "$port" ] || port=$(next_free_port)
+    wg genkey > $KEY_DIR/bb_$name.key
+    wg genkey > $KEY_DIR/bb_$name.peer
+    wg genpsk > $KEY_DIR/bb_$name.psk
+    uci batch <<EOF
+set $CFG.b_$name=babel
+set $CFG.b_$name.role='a'
+set $CFG.b_$name.ifname='bb_$name'
+set $CFG.b_$name.port='$port'
+set $CFG.b_$name.mtu='$MTU_DEFAULT'
+set $CFG.b_$name.rxcost='$rx'
+set $CFG.b_$name.keyfile='$KEY_DIR/bb_$name.key'
+set $CFG.b_$name.peerkeyfile='$KEY_DIR/bb_$name.peer'
+set $CFG.b_$name.pskfile='$KEY_DIR/bb_$name.psk'
+set $CFG.b_$name.peer_public_key='$(wg pubkey < $KEY_DIR/bb_$name.peer)'
+EOF
+    uci commit $CFG
+    ok "Babel-Verbindung $name angelegt: bb_$name lauscht auf Port $port."
+    cmd_apply
+    say ""
+    say "Diese Zeile auf dem anderen Router einfügen (Menü: b → 2, oder: wg_manager babel-einfuegen):"
+    say ""
+    cmd_babel_show "$name"
+    say ""
+    warn "Die Zeile enthält den privaten Schlüssel der Gegenseite – nur dorthin kopieren. Erneut anzeigen: wg_manager babel-zeige $name"
+}
+
+cmd_babel_insert() { # ["zeile"] [--name N] [--rxcost N]  – Seite B
+    local line="" name="" rx=$BABEL_RXCOST ep host port pub key psk i
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="$2"; shift ;;
+            --rxcost) rx="$2"; shift ;;
+            "$SNIP_TAG"*) line="$1" ;;
+            *) die "Unbekannte Angabe $1 (die Zeile bitte in Anführungszeichen)" ;;
+        esac
+        shift
+    done
+    if [ -z "$line" ]; then
+        [ -t 0 ] && printf "Zeile von Router A einfügen: "
+        read -r line
+    fi
+    line=$(echo "$line" | tr -d '\r')
+    case "$line" in "$SNIP_TAG "*) ;; *) die "Das ist keine Zeile von wg_manager (erwartet: $SNIP_TAG …)." ;; esac
+    ep=$(snip_field "$line" ep); pub=$(snip_field "$line" pub); key=$(snip_field "$line" key); psk=$(snip_field "$line" psk)
+    host=$(ep_host "$ep"); port=$(ep_port "$ep")
+    valid_key "$pub" && valid_key "$key" && valid_key "$psk" || die "Schlüssel in der Zeile unvollständig – beim Kopieren abgeschnitten?"
+    [ -n "$host" ] && echo "$port" | grep -qE '^[0-9]+$' || die "Ziel (ep=…) in der Zeile fehlerhaft."
+    echo "$rx" | grep -qE '^[0-9]+$' || die "rxcost: Zahl"
+    if [ -z "$name" ]; then
+        name=$(snip_field "$line" name)
+        if [ -t 0 ]; then
+            printf "Name der Verbindung auf diesem Router [%s]: " "$name"; read -r i; [ -n "$i" ] && name=$i
+        fi
+    fi
+    valid_tunnel_name "$name" || die "Name: 1–12 Zeichen a-z, 0-9"
+    uci -q get $CFG.b_$name >/dev/null && die "Babel-Verbindung $name gibt es schon"
+    uci -q get network.bb_$name >/dev/null && die "network.bb_$name existiert bereits"
+    babel_checks
+    ip -6 addr show | grep -qF " $host/" && die "Das ist die Zeile dieses Routers selbst – sie gehört auf den anderen Router."
+    case "$host" in
+        *:*) ip -6 route show default 2>/dev/null | grep -q . || die "Kein eigener IPv6-Anschluss (WAN mit IPv6-Standardroute) – Router B braucht ihn, um A zu erreichen." ;;
+        *) ip -4 route show default 2>/dev/null | grep -q . || die "Kein eigener Internet-Anschluss (WAN) – Router B braucht ihn, um A zu erreichen." ;;
+    esac
+    echo "$key" > $KEY_DIR/bb_$name.key
+    echo "$psk" > $KEY_DIR/bb_$name.psk
+    uci batch <<EOF
+set $CFG.b_$name=babel
+set $CFG.b_$name.role='b'
+set $CFG.b_$name.ifname='bb_$name'
+set $CFG.b_$name.endpoint_host='$host'
+set $CFG.b_$name.endpoint_port='$port'
+set $CFG.b_$name.keepalive='25'
+set $CFG.b_$name.mtu='$MTU_DEFAULT'
+set $CFG.b_$name.rxcost='$rx'
+set $CFG.b_$name.keyfile='$KEY_DIR/bb_$name.key'
+set $CFG.b_$name.pskfile='$KEY_DIR/bb_$name.psk'
+set $CFG.b_$name.peer_public_key='$pub'
+set $CFG.b_$name.von='$(snip_field "$line" von)'
+EOF
+    uci commit $CFG
+    ok "Babel-Verbindung $name angelegt: bb_$name → $ep."
+    cmd_apply
+    say "Warte auf die Gegenstelle (bis 60 s) …"
+    for i in $(seq 1 30); do
+        babel_connected bb_$name && babel_reach bb_$name "$(babel_peer_ll $name)" && break
+        sleep 2
+    done
+    if babel_connected bb_$name; then
+        ok "Verbunden mit $(snip_field "$line" von)."
+        babel_negotiate "$name"
+        say "Die Gegenseite handelt ihre MTU beim nächsten Lauf ihres Wächters aus (spätestens in 5 Minuten)."
+    else
+        warn "Noch keine Verbindung. Prüfen: Hat dieser Router IPv6 am Anschluss? Ist Port $port auf Router A erreichbar? Der Wächter versucht es weiter; Stand: wg_manager liste"
+    fi
+}
+
+babel_probe() { # ifn ll mtu [endpunkt] [mark] -> 0, wenn ein Paket dieser Größe unzerlegt hin und zurück kommt
+    local c
+    # Schnittstelle genau auf die geprüfte Größe: WireGuard füllt Pakete auf ein Vielfaches von 16 auf,
+    # aber nie über die MTU – so misst die Probe dasselbe, was später eingestellt wird
+    ip link set dev "$1" mtu "$3"
+    ping -6 -c 2 -W 2 -s $(($3 - 48)) -I "$1" "$2" >/dev/null 2>&1 || return 1
+    # kam es nur zerlegt an? Dann steht für den Endpunkt eine kleinere MTU im Routen-Cache
+    case "$4" in *:*) ;; *) return 0 ;; esac
+    c=$(ip -6 route get "$4" ${5:+mark $5} 2>/dev/null | sed -n 's/.* mtu \([0-9]*\).*/\1/p')
+    [ -z "$c" ] || [ $(($3 + WG_OVERHEAD)) -le "$c" ]
+}
+
+babel_negotiate() { # name: MTU der Senderichtung stufenweise aushandeln (Halbierungssuche $MTU_MIN..$MTU_MAX)
+    local b=$1 ifn ll ep mark lo hi m cur
+    ifn=$(bget $b ifname); ll=$(babel_peer_ll $b); cur=$(bget $b mtu)
+    babel_connected "$ifn" || { warn "Babel-Verbindung $b: nicht verbunden – MTU bleibt $cur."; return 1; }
+    babel_reach "$ifn" "$ll" 2 || { warn "Babel-Verbindung $b: Gegenstelle $ll antwortet nicht – MTU bleibt $cur."; return 1; }
+    ep=$(ep_host "$(babel_peer_ep "$ifn")")
+    [ "$(bget $b role)" = b ] && mark=0xc8
+    say "Handle die MTU für $b aus ($MTU_MIN–$MTU_MAX) …"
+    ip -6 route flush cache 2>/dev/null
+    lo=$MTU_MIN; hi=$MTU_MAX
+    if babel_probe "$ifn" "$ll" $hi "$ep" "$mark"; then
+        lo=$hi
+    elif babel_probe "$ifn" "$ll" $lo "$ep" "$mark"; then
+        while [ $((hi - lo)) -gt 1 ]; do
+            m=$(( (lo + hi) / 2 ))
+            if babel_probe "$ifn" "$ll" $m "$ep" "$mark"; then lo=$m; else hi=$m; fi
+        done
+    else
+        ip link set dev "$ifn" mtu "$cur"
+        warn "Babel-Verbindung $b: selbst $MTU_MIN kommt nicht durch – MTU bleibt $cur."
+        log "Babel $b: MTU-Aushandlung fehlgeschlagen (selbst $MTU_MIN nicht durch), bleibt $cur"
+        return 1
+    fi
+    ip link set dev "$ifn" mtu $lo
+    uci set $CFG.b_$b.mtu=$lo; uci commit $CFG
+    uci set network.$ifn.mtu=$lo; uci commit network
+    mkdir -p $BABEL_STATE
+    echo "$ep $lo $(date +%s)" > $BABEL_STATE/$b
+    ok "Babel-Verbindung $b: MTU $lo (vorher $cur)."
+    log "Babel $b: MTU $lo ausgehandelt (vorher $cur, Gegenstelle $ep)"
+}
+
+cmd_babel_mtu() { # name
+    uci -q get $CFG.b_$1 >/dev/null || die "Babel-Verbindung $1 gibt es nicht"
+    babel_negotiate "$1"
+}
+
+cmd_babel_check() { # Wächter (cron): Selbstheilung + MTU aushandeln, sobald sich die Router gefunden haben
+    local need=0 t b ifn ep sep smtu stime now
+    for t in $(tunnels); do ip link show "$(tget $t ifname)" >/dev/null 2>&1 || need=1; done
+    for b in $(babels); do
+        ifn=$(bget $b ifname)
+        ip link show "$ifn" >/dev/null 2>&1 || need=1
+        [ -d /etc/bird/fff ] && [ ! -f "$BIRD_DIR/$ifn.conf" ] && need=1
+    done
+    if [ $need = 1 ]; then
+        log "Schnittstellen oder bird-Dateien fehlten (Layer-3-Lauf der Firmware?) – wende neu an"
+        cmd_apply
+    fi
+    mkdir -p $BABEL_STATE
+    now=$(date +%s)
+    for b in $(babels); do
+        ifn=$(bget $b ifname)
+        if ! babel_connected "$ifn"; then
+            rm -f "/tmp/wg_manager/$b"    # beim nächsten Finden neu aushandeln
+            continue
+        fi
+        ep=$(ep_host "$(babel_peer_ep "$ifn")")
+        if [ -f $BABEL_STATE/$b ]; then
+            read -r sep smtu stime < $BABEL_STATE/$b
+            if [ "$sep" != "$ep" ]; then
+                log "Babel $b: Gegenstelle jetzt $ep (vorher $sep) – MTU neu aushandeln"
+                babel_negotiate "$b"
+            elif [ $((now - stime)) -ge 3600 ]; then
+                if babel_probe "$ifn" "$(babel_peer_ll $b)" "$smtu" "$ep" "$( [ "$(bget $b role)" = b ] && echo 0xc8)"; then
+                    echo "$sep $smtu $now" > $BABEL_STATE/$b
+                else
+                    log "Babel $b: MTU $smtu kommt nicht mehr durch – neu aushandeln"
+                    babel_negotiate "$b"
+                fi
+            fi
+        else
+            babel_negotiate "$b"
+        fi
+    done
+}
+
+cmd_babel_del() { # name
+    local b=$1 ifn p
+    uci -q get $CFG.b_$b >/dev/null || die "Babel-Verbindung $b gibt es nicht"
+    ifn=$(bget $b ifname)
+    mkdir -p "$ARCHIV_DIR"
+    for p in "$(bget $b keyfile)" "$(bget $b pskfile)" "$(bget $b peerkeyfile)"; do
+        [ -n "$p" ] && [ -f "$p" ] && mv -f "$p" "$ARCHIV_DIR/"
+    done
+    uci delete $CFG.b_$b
+    uci commit $CFG
+    for p in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=wireguard_$ifn$/\1/p"); do uci -q delete network.$p; done
+    uci -q delete network.$ifn
+    uci -q delete network.wgm_bb_${b}_in4
+    uci -q delete network.wgm_bb_${b}_in6
+    uci commit network
+    /etc/init.d/network reload
+    rm -f "/tmp/wg_manager/$b"
+    ok "Babel-Verbindung $b gelöscht (Schlüssel in $ARCHIV_DIR)."
+    cmd_apply
+}
+
 next_free_subnet() {
     local n used
     used=" $(for t in $(tunnels); do vpn4_base $t; done | tr '\n' ' ') "
@@ -435,7 +841,7 @@ next_free_subnet() {
     done
 }
 next_free_port() {
-    local p used=" $(for t in $(tunnels); do tget $t port; done | tr '\n' ' ') "
+    local p used=" $(for t in $(tunnels); do tget $t port; done; for t in $(babels); do bget $t port; done | tr '\n' ' ') "
     for p in $(seq 51821 51899); do
         case "$used" in *" $p "*) continue ;; esac
         netstat -uln 2>/dev/null | grep -q ":$p " && continue
@@ -902,7 +1308,7 @@ cmd_nets() {
 
 cmd_list() {
     local t p ifn st dump line pub hs rx tx ep
-    [ -n "$(tunnels)" ] || { say "Noch keine Tunnel. (Altbestand übernehmen: wg_manager migrate)"; return; }
+    [ -n "$(tunnels)$(babels)" ] || { say "Noch keine Tunnel. (Altbestand übernehmen: wg_manager migrate)"; return; }
     for t in $(tunnels); do
         ifn=$(tget $t ifname)
         ip link show "$ifn" >/dev/null 2>&1 && st="${GREEN}aktiv${NC}" || st="${RED}aus${NC}"
@@ -920,6 +1326,20 @@ cmd_list() {
                 printf "    %-16s %-14s zuletzt %-14s ↓%s ↑%s %s\n" "$p" "$(pget $p ip4)" "$(ago ${hs:-0})" "$(human_bytes ${rx:-0})" "$(human_bytes ${tx:-0})" "$( [ "$ep" != "(none)" ] && echo "$ep")"
             fi
         done
+    done
+    [ -n "$(babels)" ] && say "${BLUE}Babel-Verbindungen (Router ↔ Router)${NC}"
+    for t in $(babels); do
+        ifn=$(bget $t ifname)
+        if [ "$(bget $t role)" = a ]; then st="Seite A, Port $(bget $t port)"
+        else st="Seite B → $(bget $t von) [$(bget $t endpoint_host)]:$(bget $t endpoint_port)"; fi
+        hs=$(babel_hs "$ifn")
+        say "  $t ($ifn, $st)"
+        if babel_connected "$ifn"; then
+            ep=$(babel_reach "$ifn" "$(babel_peer_ll $t)" && echo ja || echo nein)
+            say "    ${GREEN}verbunden${NC} (zuletzt $(ago ${hs:-0}))   Gegenstelle antwortet: $ep   Babel-Routen: $(babel_routes "$ifn")   MTU: $(bget $t mtu)"
+        else
+            say "    ${RED}nicht verbunden${NC} (zuletzt $(ago ${hs:-0}))   MTU: $(bget $t mtu)"
+        fi
     done
 }
 
@@ -1091,6 +1511,22 @@ menu_tunnel_edit() {
     esac
 }
 
+menu_babel() {
+    local c b name
+    echo "Babel-Verbindungen – zwei Freifunk-Router über WireGuard und Babel koppeln"
+    echo "  1) Babel-Tunnel konfigurieren (dieser Router lauscht, gibt eine Zeile zum Einfügen aus)"
+    echo "  2) Babel-Tunnel einfügen (Zeile vom anderen Router)"
+    echo "  3) Zeile erneut anzeigen   4) MTU neu aushandeln   5) Babel-Tunnel löschen"
+    printf "Auswahl: "; read -r c
+    case "$c" in
+        1) printf "Name der Verbindung (a-z, 0-9, max. 12, z. B. lte1): "; read -r name; ( cmd_babel_add "$name" ) ;;
+        2) ( cmd_babel_insert ) ;;
+        3) b=$(choose_from "Welche Verbindung?" "$(for b in $(babels); do [ "$(bget $b role)" = a ] && echo $b; done)") && ( cmd_babel_show "$b" ) ;;
+        4) b=$(choose_from "Welche Verbindung?" "$(babels)") && ( cmd_babel_mtu "$b" ) ;;
+        5) b=$(choose_from "Welche Verbindung löschen?" "$(babels)") && { printf "%s wirklich löschen? [j/N]: " "$b"; read -r c; [ "$c" = j ] && ( cmd_babel_del "$b" ); } ;;
+    esac
+}
+
 menu() {
     local c t p name
     while true; do
@@ -1105,6 +1541,7 @@ menu() {
         echo " 3) Gerät sperren/entsperren 7) Tunnel löschen"
         echo " 4) Gerät löschen           8) Netze anzeigen"
         echo " 9) Alles neu anwenden (reparieren)   0) Beenden"
+        echo " b) Babel-Verbindungen (Router ↔ Router)"
         printf "Auswahl: "; read -r c
         case "$c" in
             1) t=$(choose_from "In welchen Tunnel?" "$(tunnels)") || { pause; continue; }
@@ -1118,6 +1555,7 @@ menu() {
             7) t=$(choose_from "Welchen Tunnel löschen?" "$(tunnels)") && { printf "Tunnel %s mit allen Geräten löschen? [j/N]: " "$t"; read -r name; [ "$name" = j ] && ( cmd_tunnel_del "$t" ); }; pause ;;
             8) cmd_nets; pause ;;
             9) ( cmd_apply ); pause ;;
+            b|B) menu_babel; pause ;;
             0|q) exit 0 ;;
         esac
     done
@@ -1139,6 +1577,16 @@ wg_manager – WireGuard-Zugänge verwalten (ohne Argumente: Menü)
                                      (MTU $MTU_MIN–$MTU_MAX, ohne Angabe $MTU_DEFAULT; auto = gemessen; DSL 1412 → 1332, 1500 → 1420)
   tunnel-loeschen <name>
   apply [-q]                         alles aus /etc/config/wgmanager neu anwenden
+
+Babel-Verbindungen (zwei Freifunk-Router koppeln, z. B. einen Router hinter LTE):
+  babel-neu <name> [--port N] [--rxcost N]
+                                     Seite A: lauscht auf ihrer Freifunk-IPv6, gibt eine Zeile zum Einfügen aus
+  babel-einfuegen ["<zeile>"] [--name N] [--rxcost N]
+                                     Seite B: Zeile von A einfügen (ohne Angabe: wird abgefragt), verbindet sich
+  babel-zeige <name>                 Zeile erneut ausgeben (Seite A)
+  babel-mtu <name>                   MTU jetzt neu aushandeln
+  babel-loeschen <name>
+  babel-pruefen [-q]                 Wächter (cron, alle 5 min): stellt Fehlendes wieder her, handelt die MTU aus
   migrate [--dns "..."]              Altbestand (wg_manager v1/privwg) übernehmen
 EOF
 }
@@ -1154,6 +1602,7 @@ case "$1" in
     mtu-messen|mtu) ensure_env; shift; cmd_mtu_check "$1" ;;
     zeige|show) ensure_env; shift; cmd_show "$@" ;;
     qr) ensure_env; shift; cmd_qr "$1" ;;
+    babel-zeige) ensure_env; shift; cmd_babel_show "$1" ;;
     *)
         # Sperre auch bei Abbruch (Strg-C, abgeschnittene Ausgabe) freigeben, sonst hängen alle weiteren Aufrufe
         [ -x /bin/lock ] && { lock "$LOCK"; trap 'lock -u "$LOCK"' EXIT; trap 'exit 1' INT TERM HUP PIPE; }
@@ -1170,6 +1619,11 @@ case "$1" in
             tunnel-neu|tunnel-add) cmd_tunnel_add "$@" ;;
             tunnel-aendern|tunnel-edit) cmd_tunnel_edit "$@" ;;
             tunnel-loeschen|tunnel-del) cmd_tunnel_del "$1" ;;
+            babel-neu) cmd_babel_add "$@" ;;
+            babel-einfuegen) cmd_babel_insert "$@" ;;
+            babel-mtu) cmd_babel_mtu "$1" ;;
+            babel-loeschen) cmd_babel_del "$1" ;;
+            babel-pruefen) cmd_babel_check ;;
             *) usage; exit 1 ;;
         esac
         ;;

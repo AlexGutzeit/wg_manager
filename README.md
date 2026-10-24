@@ -6,6 +6,8 @@ von unterwegs ins eigene Netz, nur ins Internet für Gäste, oder beides.
 - **Ein Skript** – Tunnel und Geräte per Menü oder Befehl anlegen, sperren, löschen.
 - **Nichts nachinstallieren** – nutzt nur, was die Firmware mitbringt (`wg`, `uci`, `nft`, `awk`), auch für den QR-Code.
 - **Übersteht Firmware-Updates** – Einstellungen und Schlüssel bleiben erhalten und werden beim Start neu angewendet.
+- **Babel-Verbindungen** – zwei Freifunk-Router über WireGuard und Babel koppeln, z. B. einen Router hinter einem
+  LTE-Router ins Freifunk-Netz bringen, ohne eigenen Gateway-Server. Siehe [Babel-Verbindungen](#babel-verbindungen-router--router).
 
 ## Installation
 
@@ -83,6 +85,12 @@ ssh root@<router> wg_manager zeige Laptop_Anna --raw > laptop.conf
 | `tunnel-aendern <name> [Optionen]` | Netz, Zugriff, Verwaltung, DNS, MTU umstellen |
 | `tunnel-loeschen <name>` | Tunnel mit allen Geräten entfernen |
 | `mtu-messen [ziel]` | Strecke des Routers messen, passende Tunnel-MTU vorschlagen |
+| `babel-neu <name> [--port N] [--rxcost N]` | Babel-Verbindung, Seite A: lauscht, gibt eine Zeile zum Einfügen aus |
+| `babel-einfuegen ["<zeile>"] [--name N]` | Babel-Verbindung, Seite B: Zeile von A einfügen, verbindet sich |
+| `babel-zeige <name>` | Zeile erneut ausgeben (Seite A) |
+| `babel-mtu <name>` | MTU jetzt neu aushandeln |
+| `babel-loeschen <name>` | Babel-Verbindung entfernen |
+| `babel-pruefen` | Wächter (läuft alle 5 min von selbst) |
 | `apply` | alles aus `/etc/config/wgmanager` neu anwenden (reparieren) |
 | `migrate [--dns "…"]` | Altbestand (v1/privwg) übernehmen |
 
@@ -104,6 +112,58 @@ Tunnel-MTU = Strecke des Routers ins Internet minus 80 Byte (WireGuard über IPv
 
 `wg_manager mtu-messen` misst die Strecke und zeigt, welche Tunnel abweichen; `--mtu auto` übernimmt den gemessenen
 Wert. Erlaubt sind 1280–1420. Wird die MTU kleiner, sollten die Geräte ihre Konfiguration neu einlesen.
+
+## Babel-Verbindungen (Router ↔ Router)
+
+Koppelt zwei Freifunk-Router über WireGuard und Babel. Beispiel: Ein Freifunk-Router hängt hinter einem
+LTE-Router und bekommt über einen Router mit fester Freifunk-Adresse Anschluss ans Freifunk-Netz – ohne eigenen
+Gateway-Server. Auf beiden Routern muss wg_manager (ab 2.3) installiert sein.
+
+**Seite A** (lauscht, hat eine feste Freifunk-IPv6 aus `router_ip6` oder dem Client-Netz):
+
+```sh
+wg_manager babel-neu lte1
+```
+
+Ausgegeben wird **eine Zeile**, etwa `wgm-babel1 name=lte1 von=<router-a> ep=[2a0b:…]:51821 pub=… key=… psk=…`.
+
+**Seite B** (verbindet sich, z. B. hinter LTE) – Zeile einfügen:
+
+```sh
+wg_manager babel-einfuegen          # fragt nach der Zeile
+```
+
+Im Menü: `b` → `1` (konfigurieren) bzw. `b` → `2` (einfügen). Danach steht der Tunnel, Babel tauscht die Routen aus.
+
+**MTU aushandeln:** Beide Seiten starten mit 1280. Sobald sich die Router gefunden haben (WireGuard verbunden, die
+Gegenstelle antwortet), sucht jede Seite für ihre Senderichtung stufenweise die größte MTU zwischen 1280 und 1420:
+Pings in voller Paketgröße an die Gegenstelle durch den Tunnel, wobei geprüft wird, dass unterwegs nichts zerlegt
+wurde. Hin- und Rückweg können verschieden sein (z. B. bei LTE). Ein Wächter (alle 5 Minuten) handelt neu aus, wenn
+die Verbindung weg war oder sich die Adresse der Gegenstelle ändert, und prüft stündlich, ob die MTU noch passt.
+Von Hand: `wg_manager babel-mtu <name>`.
+
+**Voraussetzungen**
+
+- Seite A ist über ihre feste Freifunk-IPv6 erreichbar. Die IPv6 des DSL-/LTE-Anbieters wird bewusst nie benutzt
+  (wechselt, ist hinter einer Fritzbox meist gesperrt).
+- Seite B hat einen eigenen Internet-Anschluss **mit IPv6** (WAN) – über ihn läuft der Tunnel zu A.
+- Seite B hat eine **eigene Freifunk-Identität** (Router-IP, eigene Netze). Ein Router mit den Adressen eines anderen
+  Knotens würde dessen Netze ein zweites Mal ankündigen.
+- Die Zeile enthält den privaten Schlüssel von B – nur dorthin kopieren. Erneut anzeigen: `wg_manager babel-zeige <name>`.
+
+**Technik**
+
+- Schnittstelle `bb_<name>` (nicht `wg_…`: die Layer-3-Skripte der Firmware löschen `wg_`-Schnittstellen ohne
+  eigenen gateway-Eintrag), Link-Local `fe80::1` (A) und `fe80::2` (B) plus die Router-IP, `rxcost` 16384 wie bei
+  den Firmware-Tunneln (`--rxcost N`).
+- Babel: eine Datei je Verbindung in `/etc/bird/fff/babelpeers/`; bird wird erst nach erfolgreicher Prüfung
+  (`bird -p`) neu geladen.
+- B markiert seine Tunnelpakete (`fwmark 0xc8`, wie die Firmware), damit sie über den eigenen Anschluss gehen und
+  nicht in den Tunnel selbst. A markiert nicht – er antwortet über seine Freifunk-Adresse.
+- A trägt bis zur ersten Verbindung einen Platzhalter `[::1]:9` als Ziel ein; sonst meldet bird für jedes
+  Babel-Hallo einen Fehler und füllt das Systemprotokoll.
+- Der Wächter liegt bei micrond der Firmware in `/usr/lib/micron.d/wg_manager` und stellt auch Schnittstellen und
+  bird-Dateien wieder her, die ein Layer-3-Lauf der Firmware entfernt hat.
 
 ## Was im Hintergrund passiert
 
@@ -131,8 +191,13 @@ stellt sich nach einem Firmware-Update alles von selbst wieder her.
 
 ## Getestet
 
-Freifunk-Franken-Firmware layer3-20241219 (OpenWrt 23.05.5) auf einem EdgeRouter X, Router hängt über Freifunk
-(Strecke 1412). Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
+- Freifunk-Franken-Firmware layer3-20241219 (OpenWrt 23.05.5) auf einem EdgeRouter X, Router hängt über Freifunk
+  (Strecke 1412): Tunnel, Geräte, QR-Code, MTU.
+- layer3-20250321-beta (OpenWrt 24.10) auf einem TL-WR1043ND v2 mit DSL-Anschluss: Babel-Verbindung Seite A gegen
+  eine Test-Gegenstelle (WireGuard ohne Babel) – Verbindung, MTU-Suche (auch mit künstlicher Engstelle ohne
+  Rückmeldung), Wächter. Der Test mit zwei echten Routern (Seite B mit Babel) steht noch aus.
+
+Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
 ## Entwicklung
 
@@ -147,6 +212,8 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
+- **2.3** (24.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern (`babel-neu`, `babel-einfuegen`, MTU wird
+  ausgehandelt, Wächter); Endpunkt nur noch feste Freifunk-IPv6, nie die Adresse des WAN-Anschlusses.
 - **2.2** (23.10.2026) – MTU je Tunnel einstellbar und messbar (`--mtu`, `mtu-messen`); Einrückung mit Leerzeichen
   (Einfügen in die SSH-Sitzung).
 - **2.1** (23.10.2026) – QR-Code im Terminal ohne Zusatzpakete; Sperre wird bei Abbruch freigegeben.
