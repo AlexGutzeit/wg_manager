@@ -99,12 +99,16 @@ endpoint_addr() {
     [ -n "$e" ] && { echo "$e"; return; }
     public_ip6
 }
-public_ip6() {
-    for a in $(uci -q get gateway.meta.router_ip6); do
+public_ip6() { # feste, öffentliche Freifunk-IPv6 des Routers – nie die (wechselnde) Adresse des WAN-Anschlusses
+    local a wan
+    for a in $(uci -q get gateway.meta.router_ip6) $(uci -q get gateway.@client[0].ip6addr); do
         a=${a%/*}
         case "$a" in fc*|fd*|fe80*) ;; *) echo "$a"; return ;; esac
     done
-    ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | sed 's#/.*##' | grep -vE '^f[cd]' | head -1
+    # Notlösung: globale Adresse, die nicht am WAN-Anschluss hängt
+    wan=$(ifstatus wan 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+    ip -6 addr show scope global 2>/dev/null | awk -v w="$wan" '/^[0-9]+:/{d=$2; sub(/:$/,"",d); sub(/@.*/,"",d)} /inet6/ && d!=w {print $2}' \
+        | sed 's#/.*##' | grep -vE '^f[cd]' | head -1
 }
 endpoint_str() { # tunnel
     local a=$(endpoint_addr) port=$(tget $1 port)
