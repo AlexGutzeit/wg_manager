@@ -185,8 +185,10 @@ den anderen. Einen festen Hauptweg bekommt man über verschiedene rxcost (z. B. 
 Handys und Laptops können sich auch mit Router B verbinden – über dessen feste Freifunk-Adresse, also durch den
 Babel-Tunnel (erreichbar, solange mindestens eine Babel-Verbindung steht). Das ist **Tunnel im Tunnel**: Hängt
 Router A hinter einem 1412er-Zugang, hat der Babel-Tunnel 1332, ein Gerätetunnel braucht aber mindestens
-1280 + 80 = 1360. Die äußeren Pakete des Geräts werden dann zerlegt – das geht, ist aber weniger effizient, und manche
-Mobilfunknetze verwerfen zerlegte IPv6-Pakete. Wenn möglich, Geräte direkt mit Router A verbinden.
+1280 + 80 = 1360. Die äußeren Pakete des Geräts werden dann zerlegt – das geht, ist aber weniger effizient, und bei
+schlechtem Mobilfunk kostet jedes verlorene Bruchstück ein ganzes Paket. Getestet: funktioniert, bei schwachem LTE
+aber spürbar langsam. Wenn möglich, Geräte direkt mit Router A verbinden – ins Netz hinter Router B kommen sie von
+dort über Babel ohnehin.
 
 ## Alle Befehle
 
@@ -300,7 +302,10 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   4 Sekunden. Laufzeit über LTE 120–150 ms. Neue LTE-Adresse (Fritzbox „Neu verbinden“): beide Tunnel stehen nach
   rund einer Minute wieder, die Router A übernehmen die neue Adresse, ihre Wächter handeln die MTU beim nächsten
   Lauf neu aus. Echter Neustart von Router B: Babel-Nachbarn nach 76 Sekunden.
-- **Noch nicht getestet:** Gerätetunnel (Handy) zu Router B durch den Babel-Tunnel.
+- **Gerätetunnel zu Router B (Tunnel im Tunnel, 25.10.2026):** Handy über Mobilfunk mit Router B hinter LTE
+  verbunden – funktioniert. Wie erwartet werden die Pakete zerlegt (Router B setzt sie zusammen bzw. zerlegt seine
+  Antworten selbst). Bei schlechtem LTE-Empfang am Router (Laufzeit 450–1100 ms) war es spürbar langsam, und
+  einzelne Pakete gingen verloren, weil ein Bruchstück fehlte. Ein Test bei gutem Empfang steht noch aus.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
