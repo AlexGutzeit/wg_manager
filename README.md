@@ -297,9 +297,10 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   Mobilfunkanbieter), verbunden mit **zwei Routern A**. Beide Tunnel handeln 1332 aus; Geräte hinter Router B kommen
   über IPv4 (NAT) und IPv6 (eigenes /64) ins Internet, das Netz von B ist im Freifunk-Netz erreichbar. Hauptweg über
   rxcost (16384/20000); fällt er aus, übernimmt der zweite Router A nach rund 23 Sekunden, zurück ging es nach
-  4 Sekunden. Laufzeit über LTE 120–150 ms.
-- **Noch nicht getestet:** Gerätetunnel (Handy) zu Router B durch den Babel-Tunnel und ein Wechsel der
-  LTE-Adresse.
+  4 Sekunden. Laufzeit über LTE 120–150 ms. Neue LTE-Adresse (Fritzbox „Neu verbinden“): beide Tunnel stehen nach
+  rund einer Minute wieder, die Router A übernehmen die neue Adresse, ihre Wächter handeln die MTU beim nächsten
+  Lauf neu aus. Echter Neustart von Router B: Babel-Nachbarn nach 76 Sekunden.
+- **Noch nicht getestet:** Gerätetunnel (Handy) zu Router B durch den Babel-Tunnel.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
