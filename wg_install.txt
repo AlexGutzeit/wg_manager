@@ -322,7 +322,14 @@ reload_bird() {
         rm -f /etc/bird/fff/babelpeers/bb_*.conf
         die "bird-Konfiguration fehlerhaft – Babel-Dateien wieder entfernt, bird NICHT neu geladen"
     fi
-    /etc/init.d/fff-bird reload
+    # Hat ein Router keinen einzigen Babel-Nachbarn, findet bird beim Start keine Datei in babelpeers/,
+    # stürzt ab und procd gibt auf – dann hilft kein Neuladen, bird muss gestartet werden
+    if pidof bird >/dev/null; then
+        /etc/init.d/fff-bird reload
+    else
+        log "bird lief nicht – starte fff-bird"
+        /etc/init.d/fff-bird restart >/dev/null 2>&1
+    fi
 }
 
 nft_block() {
@@ -857,6 +864,9 @@ cmd_babel_check() { # Wächter (cron): Selbstheilung + MTU aushandeln, sobald si
     if [ $need = 1 ]; then
         log "Schnittstellen oder bird-Dateien fehlten (Layer-3-Lauf der Firmware?) – wende neu an"
         cmd_apply
+    elif [ -n "$(babels)" ] && [ -d /etc/bird/fff ] && ! pidof bird >/dev/null; then
+        log "bird lief nicht – starte fff-bird"
+        /etc/init.d/fff-bird restart >/dev/null 2>&1
     fi
     mkdir -p $BABEL_STATE
     now=$(date +%s)

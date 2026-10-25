@@ -264,6 +264,9 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
 - Die Layer-3-Skripte der Firmware löschen jede `wg_`-Schnittstelle ohne eigenen gateway-Eintrag und erzeugen
   `/etc/bird/fff` bei jedem Lauf neu. wg_manager stellt beides beim Start und über den Wächter wieder her; darum
   heißen Babel-Schnittstellen `bb_…`.
+- Hat ein Router keinen einzigen Babel-Nachbarn (z. B. nur über wg_manager angebunden), startet bird beim Hochfahren
+  nicht: Es findet keine Datei in `babelpeers/`, stürzt ab, und procd gibt auf. wg_manager startet bird dann selbst –
+  beim Anwenden und über den Wächter.
 - Auf der Beta-Firmware fehlt `birdc`; die Babel-Nachbarn zeigt `birdcl show babel neighbors`.
 
 ## Gut zu wissen
@@ -290,7 +293,13 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   nach entfernter bird-Datei, Neuaushandeln nach Adresswechsel, Erkennen einer verschwundenen Gegenstelle); rxcost
   ändern auf beiden Seiten ohne Tunnelabriss und Übernahme über die Zeile; zwei Verbindungen auf einem Router B mit
   automatisch eindeutigen Namen; Löschen ohne Reste.
-- **Noch nicht getestet:** ein echter LTE-Anschluss und zwei verschiedene Router A für einen Router B.
+- **LTE (25.10.2026):** Router B = EdgeRouter X (layer3-20250321-beta) hinter einer LTE-Fritzbox (IPv6 vom
+  Mobilfunkanbieter), verbunden mit **zwei Routern A**. Beide Tunnel handeln 1332 aus; Geräte hinter Router B kommen
+  über IPv4 (NAT) und IPv6 (eigenes /64) ins Internet, das Netz von B ist im Freifunk-Netz erreichbar. Hauptweg über
+  rxcost (16384/20000); fällt er aus, übernimmt der zweite Router A nach rund 23 Sekunden, zurück ging es nach
+  4 Sekunden. Laufzeit über LTE 120–150 ms.
+- **Noch nicht getestet:** Gerätetunnel (Handy) zu Router B durch den Babel-Tunnel und ein Wechsel der
+  LTE-Adresse.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
@@ -308,7 +317,8 @@ Eingerückt wird mit vier Leerzeichen.
 ## Versionen
 
 - **2.3** (25.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern (`babel-neu`, `babel-einfuegen`, MTU wird
-  ausgehandelt, rxcost einstellbar und nachträglich änderbar, Namensvorschlag auf Router B, Wächter); Endpunkt nur
+  ausgehandelt, rxcost einstellbar und nachträglich änderbar, Namensvorschlag auf Router B, Wächter startet auch
+  bird, falls es nicht läuft); Endpunkt nur
   noch feste Freifunk-IPv6, nie die Adresse des WAN-Anschlusses.
 - **2.2** (23.10.2026) – MTU je Tunnel einstellbar und messbar (`--mtu`, `mtu-messen`); Einrückung mit Leerzeichen
   (Einfügen in die SSH-Sitzung).
