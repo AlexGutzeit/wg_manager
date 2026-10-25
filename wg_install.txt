@@ -1414,6 +1414,9 @@ cmd_list() {
         done
     done
     [ -n "$(babels)" ] && say "${BLUE}Babel-Verbindungen (Router ↔ Router)${NC}"
+    if [ -n "$(babels)" ] && [ -d /etc/bird/fff ] && ! pidof bird >/dev/null; then
+        say "  ${RED}ACHTUNG: bird läuft nicht – kein Babel, keine Routen!${NC} Starten: wg_manager babel-pruefen (macht der Wächter auch alle 5 min)"
+    fi
     for t in $(babels); do
         ifn=$(bget $t ifname)
         if [ "$(bget $t role)" = a ]; then st="Seite A, Port $(bget $t port)"
