@@ -266,9 +266,10 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
 - Die Layer-3-Skripte der Firmware löschen jede `wg_`-Schnittstelle ohne eigenen gateway-Eintrag und erzeugen
   `/etc/bird/fff` bei jedem Lauf neu. wg_manager stellt beides beim Start und über den Wächter wieder her; darum
   heißen Babel-Schnittstellen `bb_…`.
-- Hat ein Router keinen einzigen Babel-Nachbarn (z. B. nur über wg_manager angebunden), startet bird beim Hochfahren
-  nicht: Es findet keine Datei in `babelpeers/`, stürzt ab, und procd gibt auf. wg_manager startet bird dann selbst –
-  beim Anwenden und über den Wächter.
+- Hat ein Router keinen einzigen Babel-Nachbarn (z. B. nur über wg_manager angebunden), legt die Firmware den Ordner
+  `babelpeers/` gar nicht an. bird 2.16.1 (Beta) bricht dann beim Hochfahren ab („Unable to match pattern …: No such
+  file or directory“), und procd gibt auf. Ein leerer Ordner stört nicht, und bird 2.15.1 (20241219) ist nicht
+  betroffen. wg_manager startet bird in diesem Fall selbst – beim Anwenden und über den Wächter.
 - Auf der Beta-Firmware fehlt `birdc`; die Babel-Nachbarn zeigt `birdcl show babel neighbors`.
 
 ## Gut zu wissen

@@ -322,8 +322,8 @@ reload_bird() {
         rm -f /etc/bird/fff/babelpeers/bb_*.conf
         die "bird-Konfiguration fehlerhaft – Babel-Dateien wieder entfernt, bird NICHT neu geladen"
     fi
-    # Hat ein Router keinen einzigen Babel-Nachbarn, findet bird beim Start keine Datei in babelpeers/,
-    # stürzt ab und procd gibt auf – dann hilft kein Neuladen, bird muss gestartet werden
+    # Hat ein Router keinen einzigen Babel-Nachbarn, legt die Firmware babelpeers/ nicht an; bird 2.16.1 (Beta)
+    # bricht dann beim Start ab und procd gibt auf – dann hilft kein Neuladen, bird muss gestartet werden
     if pidof bird >/dev/null; then
         /etc/init.d/fff-bird reload
     else
