@@ -305,7 +305,7 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
 - **Gerätetunnel zu Router B (Tunnel im Tunnel, 25.10.2026):** Handy über Mobilfunk mit Router B hinter LTE
   verbunden – funktioniert. Wie erwartet werden die Pakete zerlegt (Router B setzt sie zusammen bzw. zerlegt seine
   Antworten selbst). Bei schlechtem LTE-Empfang am Router (Laufzeit 450–1100 ms) war es spürbar langsam, und
-  einzelne Pakete gingen verloren, weil ein Bruchstück fehlte. Ein Test bei gutem Empfang steht noch aus.
+  einzelne Pakete gingen verloren, weil ein Bruchstück fehlte. Bei mittelgutem Empfang lief es gut.
 
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
