@@ -1,22 +1,26 @@
 # wg_manager
 
 WireGuard für **Freifunk-Franken-Router** (Layer-3-Firmware) – ein einzelnes Shell-Skript, das nichts nachinstalliert
-und Firmware-Updates übersteht. Es kann zwei Dinge:
+und Firmware-Updates übersteht. Es kann drei Dinge:
 
 - **Gerätetunnel** – Handy und Laptop kommen von unterwegs ins eigene Netz, nur ins Internet (Gäste) oder beides.
   Die Konfiguration gibt es als Text oder als QR-Code direkt im Terminal.
 - **Babel-Verbindungen** – zwei Freifunk-Router koppeln, z. B. einen Router hinter einem LTE-Router ans Freifunk-Netz
   bringen, ohne eigenen Gateway-Server. Die MTU handeln die Router selbst aus.
+- **Netzverbindungen** – ein Netz eines anderen Freifunk-Routers aus dem eigenen Netz erreichen, z. B. den Drucker
+  hinter dessen Fritzbox aus dem eigenen Heimnetz. Haben beide Netze denselben Adressbereich (bei Fritzboxen die
+  Regel), gilt automatisch ein Ersatznetz.
 
 ## Inhalt
 
 1. [Installation](#installation)
 2. [Gerätetunnel für Handy und Laptop](#gerätetunnel-für-handy-und-laptop)
 3. [Babel-Verbindungen zwischen Routern](#babel-verbindungen-zwischen-routern)
-4. [Alle Befehle](#alle-befehle)
-5. [Technik](#technik)
-6. [Gut zu wissen](#gut-zu-wissen)
-7. [Getestet](#getestet) · [Entwicklung](#entwicklung) · [Versionen](#versionen) · [Lizenz](#lizenz)
+4. [Netzverbindungen zwischen Netzen](#netzverbindungen-zwischen-netzen)
+5. [Alle Befehle](#alle-befehle)
+6. [Technik](#technik)
+7. [Gut zu wissen](#gut-zu-wissen)
+8. [Getestet](#getestet) · [Entwicklung](#entwicklung) · [Versionen](#versionen) · [Lizenz](#lizenz)
 
 ## Installation
 
@@ -67,6 +71,16 @@ Im Menü: Punkt 5 (Tunnel anlegen), Punkt 1 (Gerät hinzufügen, danach „Als Q
 
 Ohne Angabe wählt das Skript: Port ab 51821, Adressbereich 10.10.x.0/24 und fd00:cafe:x::/64, MTU 1280,
 DNS = der Router im Tunnel.
+
+### Netze
+
+Ein Tunnel führt nur in Netze, in denen Endgeräte stehen – das zeigt `wg_manager netze`:
+
+- die **Client-Netze** der Firmware (bei der Beta heißen sie `cfgXXXXXX`),
+- das **WAN** (`wan`), z. B. das Netz der Fritzbox, an der der Router hängt – nur IPv4, weil sich die IPv6 des
+  Anbieters ändert.
+
+Babel-, Mesh- und Tunnelschnittstellen lehnt wg_manager mit Begründung ab, auch solche, die es nicht kennt.
 
 ### Zugriffsarten
 
@@ -190,6 +204,65 @@ schlechtem Mobilfunk kostet jedes verlorene Bruchstück ein ganzes Paket. Getest
 aber spürbar langsam. Wenn möglich, Geräte direkt mit Router A verbinden – ins Netz hinter Router B kommen sie von
 dort über Babel ohnehin.
 
+## Netzverbindungen zwischen Netzen
+
+Macht ein Netz von **Router A** für Geräte im Netz von **Router B** erreichbar. Typischer Fall: Router A hängt mit
+seinem WAN an einer Fritzbox, dahinter steht ein Drucker; Router B ist der eigene Router mit dem Heimnetz. Innerhalb
+von Freifunk ist ohnehin alles verbunden – an das Netz hinter einem Router kommt man aber nur mit Tunnel, Routing und
+Adressübersetzung.
+
+- **Nur in eine Richtung:** Geräte im Netz von B erreichen das Netz von A, nicht umgekehrt. Router A lässt aus dem
+  Tunnel nur das freigegebene Netz zu – nicht sein Internet, nicht das Freifunk-Netz, nicht sich selbst.
+- **Nur das Netz von A** geht in den Tunnel; Heimnetz, Freifunk und Internet laufen auf Router B wie bisher.
+- **Niemand muss eine Route eintragen:** Router B schickt alles mit seiner Tunneladresse, Router A mit seiner
+  eigenen Adresse im freigegebenen Netz (NAT) – der Drucker antwortet einfach seinem Router.
+- Nur IPv4.
+
+### Schnellstart
+
+**Router A** – Menü `n` → `1`, oder:
+
+```sh
+wg_manager netz-neu drucker --netz wan      # WAN freigeben (ohne --netz: WAN)
+```
+
+**Router B** – Menü `n` → `2`, oder:
+
+```sh
+wg_manager netz-einfuegen                   # fragt nach der Zeile
+```
+
+### Gleiche Netze: das Ersatznetz
+
+Fast jede Fritzbox verteilt 192.168.178.0/24 – das Netz von A ist dann oft auch auf B in Gebrauch. Router B prüft
+die Zeile gegen **alle** seine Netze (Client-Netze, WAN, Tunnel, Freifunk), nicht nur gegen den DHCP-Bereich.
+
+- **Keine Überschneidung:** Router B erreicht das Netz von A unter dessen echten Adressen.
+- **Überschneidung:** Router B nimmt das **Ersatznetz**, das Router A beim Anlegen zufällig aus 10.201.0.0/16 wählt
+  und 1:1 abbildet – die letzte Zahl bleibt gleich: aus Sicht von B ist `10.201.7.25` der Drucker `192.168.178.25`.
+  Im Menü fragt Router B vorher nach; mit `--ohne-ersatz` lehnt er stattdessen ab.
+- Ist auch das Ersatznetz auf B belegt, lehnt B ab; auf A dann mit `--ersatz <netz>` ein anderes wählen.
+
+**Drucker über das Ersatznetz:** Die automatische Suche (mDNS/Bonjour) geht nicht über geroutete Netze – den Drucker
+einmal von Hand einrichten. Manche Drucker nehmen über HTTP/IPP nur Anfragen an ihre eigene Adresse oder ihren Namen
+an (Schutz vor DNS-Rebinding) und antworten auf die Ersatzadresse mit „400 Bad Request“. Dann entweder
+**Raw/JetDirect** (`socket://10.201.7.25:9100`) nehmen oder den Namen des Druckers im DNS von Router B auf die
+Ersatzadresse zeigen lassen und den Drucker über diesen Namen einrichten.
+
+### Was in der Zeile steht
+
+```
+wgm-netz1 name=drucker von=hbl-abc-router ep=[2a0b:f4c0:…::4]:51822 netz=192.168.178.0/24 ersatz=10.201.7.0/24 tr=169.254.93.80 pub=… key=… psk=…
+```
+
+| Feld | Inhalt |
+|---|---|
+| `ep` | feste Freifunk-IPv6 und Port von Router A |
+| `netz`, `ersatz` | freigegebenes Netz von A und sein Ersatznetz |
+| `tr` | Tunneladressen (/30 aus 169.254.0.0/16; A = .1, B = .2) – verlassen den Tunnel nie |
+| `key` | **privater Schlüssel von Router B** – die Zeile nur dorthin kopieren |
+| `pub`, `psk`, `name`, `von` | wie bei Babel-Verbindungen |
+
 ## Alle Befehle
 
 Ohne Angabe öffnet `wg_manager` das Menü; `wg_manager hilfe` zeigt diese Liste mit Optionen.
@@ -198,8 +271,8 @@ Ohne Angabe öffnet `wg_manager` das Menü; `wg_manager hilfe` zeigt diese Liste
 
 | `wg_manager …` | macht |
 |---|---|
-| `liste` | Tunnel, Geräte und Babel-Verbindungen mit Status |
-| `netze` | Netze des Routers, in die ein Tunnel führen kann |
+| `liste` | Tunnel, Geräte, Babel- und Netzverbindungen mit Status |
+| `netze` | Netze des Routers, in die ein Tunnel führen kann (Client-Netze und WAN) |
 | `mtu-messen [ziel]` | Strecke des Routers messen, passende Tunnel-MTU vorschlagen |
 | `apply` | alles aus `/etc/config/wgmanager` neu anwenden (reparieren) |
 | `migrate [--dns "…"]` | Altbestand (v1/privwg) übernehmen |
@@ -232,6 +305,17 @@ Optionen für `tunnel-neu` / `tunnel-aendern`: `--netz "<netz> …"`, `--zugriff
 | `babel-loeschen <name>` | Babel-Verbindung entfernen |
 | `babel-pruefen` | Wächter (läuft alle 5 Minuten von selbst) |
 
+**Netzverbindungen**
+
+| `wg_manager …` | macht |
+|---|---|
+| `netz-neu <name> [--netz wan\|<netz>] [--ersatz <netz>] [--port N]` | Router A: gibt ein Netz frei, gibt eine Zeile aus |
+| `netz-einfuegen ["<zeile>"] [--name N] [--netz "<netz> …"] [--ohne-ersatz]` | Router B: Zeile einfügen, prüft auf gleiche Netze, verbindet sich |
+| `netz-zeige <name>` | Zeile erneut ausgeben (Router A) |
+| `netz-loeschen <name>` | Netzverbindung entfernen |
+
+`--netz` auf Router B: aus welchen eigenen Netzen man das Netz von A erreichen darf (ohne Angabe: alle Client-Netze).
+
 ## Technik
 
 ### Was `apply` erzeugt
@@ -240,7 +324,7 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
 `wg_manager apply`:
 
 - die Schnittstellen und Gegenstellen in `/etc/config/network` (`wg_<tunnel>` für Gerätetunnel, `bb_<name>` für
-  Babel-Verbindungen),
+  Babel-Verbindungen, `nv_<name>` für Netzverbindungen),
 - die Routing-Regeln als uci-Einträge (von netifd verwaltet),
 - einen Firewall-Block in `/etc/nftables-fff.conf` (Tabelle `inet wg_manager`, lädt `fff-firewall`),
 - je Babel-Verbindung eine Datei in `/etc/bird/fff/babelpeers/` – bird wird erst nach erfolgreicher Prüfung
@@ -260,6 +344,19 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   (`Ip6FragCreates`) – das erkennt auch einen eigenen Uplink-Tunnel mit kleinerer MTU.
 - Der Wächter liegt bei micrond der Firmware in `/usr/lib/micron.d/wg_manager` (die Firmware liest kein
   `/etc/crontabs`).
+
+### Netzverbindungen im Detail
+
+- Router A: Regel „aus `nv_<name>` → Tabelle des freigegebenen Netzes“ (WAN: `main`, Client-Netz: Freifunk-Tabelle),
+  Ersatznetz per `dnat ip prefix to` auf das echte Netz, Absender beim Verlassen ins freigegebene Netz per
+  `masquerade`. Die Firmware sperrt jede Weiterleitung ins WAN (`oifname <wan> reject`) – wg_manager setzt davor eine
+  Freigabe nur für `nv_<name>` → WAN.
+- Router B: Route für das Netz von A (bzw. das Ersatznetz) über `nv_<name>` in `main` plus Regel mit Priorität 10,
+  damit es nicht über die Freifunk-Tabelle läuft; Antworten aus dem Tunnel über die Freifunk-Tabelle.
+- Beide Seiten: neue Verbindungen nur von B nach A, Zugriff auf den Router selbst über den Tunnel gesperrt (nur Ping
+  auf die Tunneladresse ist erlaubt, zum Prüfen).
+- Die Tunnelpakete von B laufen über Freifunk zur festen Freifunk-IPv6 von A – Router B braucht keinen eigenen
+  Internet-Anschluss.
 
 ### Eigenheiten der Firmware
 
@@ -308,6 +405,14 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   Antworten selbst). Bei schlechtem LTE-Empfang am Router (Laufzeit 450–1100 ms) war es spürbar langsam, und
   einzelne Pakete gingen verloren, weil ein Bruchstück fehlte. Bei mittelgutem Empfang lief es gut.
 
+- **Netzverbindung und WAN als Netz (27.10.2026):** Router A TL-WDR4900 v1 (layer3-20250321-beta) gibt sein WAN
+  (Fritzbox-Netz 192.168.178.0/24) frei, Router B EdgeRouter X (layer3-20241219) hat im Heimnetz denselben Bereich –
+  B erkennt das und nimmt das Ersatznetz. Aus dem Heimnetz: Ping, Weboberfläche, IPP (631) und Raw-Druck (9100) des
+  Druckers erreichbar; IPP nimmt der Drucker nur unter seinem eigenen Namen an (siehe oben). Gegenproben: kein
+  Zugriff auf die Router über den Tunnel (Zähler der Sperren steigen), kein Weg von A ins Heimnetz, kein Internet über
+  A, aus dem Freifunk-Netz nicht erreichbar; ein Router mit eigenem 192.168.178.0/24 lehnt mit `--ohne-ersatz` ab und
+  hinterlässt nichts. Gerätetunnel mit Netz `wan`: Testgerät erreicht Drucker und Fritzbox hinter Router A.
+
 Rückmeldungen von anderen Routern und Anschlüssen (LTE, Richtfunk) sind willkommen.
 
 ## Entwicklung
@@ -323,6 +428,9 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
+- **2.4** (27.10.2026) – Netzverbindungen zwischen Netzen (`netz-neu`, `netz-einfuegen`, Überschneidungsprüfung gegen
+  alle Netze des Routers, Ersatznetz mit 1:1-Abbildung, nur in eine Richtung); Gerätetunnel nur noch in Client-Netze
+  und das WAN (neu wählbar), Babel-/Mesh-/Tunnelschnittstellen werden abgelehnt.
 - **2.3** (25.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern (`babel-neu`, `babel-einfuegen`, MTU wird
   ausgehandelt, rxcost einstellbar und nachträglich änderbar, Namensvorschlag auf Router B, Wächter startet auch
   bird, falls es nicht läuft); Endpunkt nur

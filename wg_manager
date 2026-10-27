@@ -1,7 +1,8 @@
 #!/bin/sh
 # ============================================================================
 #  wg_manager – WireGuard-Zugänge auf Freifunk-Franken-Routern (Layer3)
-#  Version 2.3 (25.10.2026) – Babel-Verbindungen zwischen Freifunk-Routern; MTU je Tunnel; QR-Code eingebaut
+#  Version 2.4 (27.10.2026) – Netzverbindungen (Netz ↔ Netz, Ersatznetz bei gleichen Netzen); WAN als Netz
+#  für Gerätetunnel. 2.3: Babel-Verbindungen zwischen Freifunk-Routern; MTU je Tunnel; QR-Code eingebaut
 #
 #  Alle Einstellungen stehen in /etc/config/wgmanager (Tunnel + Geräte).
 #  Daraus erzeugt "wg_manager apply" bei jedem Start:
@@ -9,6 +10,7 @@
 #    - die Routing-Regeln (als uci-Regeln, von netifd verwaltet)
 #    - die Firewall-Regeln (Block in /etc/nftables-fff.conf, lädt fff-firewall)
 #    - für Babel-Verbindungen (Router <-> Router) zusätzlich die bird-Dateien in /etc/bird/fff/babelpeers
+#    - für Netzverbindungen (Netz <-> Netz) die Schnittstellen nv_<name>, Routen und NAT
 #  Schlüssel liegen in /etc/wireguard. Konfiguration, Schlüssel und dieses Skript
 #  stehen in /etc/sysupgrade.conf und überstehen so ein Firmware-Update; danach
 #  stellt der Start-Aufruf in /etc/rc.local.fff_userconfig alles wieder her.
@@ -59,6 +61,14 @@ MICRON_DIR=/usr/lib/micron.d
 CRON_FILE=/etc/crontabs/root
 CRON_LINE="*/5 * * * * /usr/sbin/wg_manager babel-pruefen -q"
 
+# Netzverbindungen (ein Netz von Router A, z. B. sein Fritzbox-Netz, für ein Netz von Router B erreichbar machen):
+# Seite A gibt das Netz frei und erzeugt eine Zeile, Seite B fügt sie ein. Nur B → A und nur IPv4; beide Seiten
+# übersetzen die Absender (NAT), dort muss niemand eine Route eintragen. Überschneidet sich das Netz von A mit
+# einem Netz auf B (fast jede Fritzbox hat 192.168.178.0/24), nimmt B das Ersatznetz, das A 1:1 abbildet
+# (10.201.7.25 → 192.168.178.25). Tunneladressen: ein /30 aus 169.254.0.0/16, verlässt den Tunnel nie.
+NETZ_TAG=wgm-netz1
+ERSATZ_BASIS=10.201
+
 QUIET=0
 
 if [ -t 1 ]; then
@@ -98,6 +108,8 @@ tget() { uci -q get $CFG.t_$1.$2; }
 pget() { uci -q get $CFG.p_$1.$2; }
 babels() { uci -q show $CFG | sed -n "s/^$CFG\.b_\([^.=]*\)=babel$/\1/p"; }
 bget() { uci -q get $CFG.b_$1.$2; }
+netlinks() { uci -q show $CFG | sed -n "s/^$CFG\.n_\([^.=]*\)=netz$/\1/p"; }
+lget() { uci -q get $CFG.n_$1.$2; }
 
 fff_table() { awk '$2=="fff"{print $1}' /etc/iproute2/rt_tables 2>/dev/null | head -1; }
 
@@ -134,23 +146,28 @@ endpoint_str() { # tunnel
 #  Netze des Routers erkennen (statt sie im Skript einzutragen)
 # ---------------------------------------------------------------------------
 
-# Ausgabe je Zeile: name|gerät|ipv4-netze|ipv6-netze  (nur Client-Netze mit Adressen)
+# Ausgabe je Zeile: name|gerät|ipv4-netze|ipv6-netze – nur Netze, in denen Endgeräte sinnvoll aufgehoben sind:
+# die Client-Netze der Firmware (gateway-Abschnitte vom Typ client, anonyme heißen cfgXXXXXX) und das WAN
+# (z. B. das Netz der Fritzbox). Babel-, Mesh- und Tunnelschnittstellen kommen hier nie vor, auch unbekannte nicht.
 nets_detect() {
-    local i dev proto v4 v6
-    for i in $(ubus list 'network.interface.*' 2>/dev/null | sed 's/^network\.interface\.//'); do
-        case "$i" in loopback|lo|fdff|routerip|wan|wan4|wan6|ethmesh|babelpeer_*) continue ;; esac
-        proto=$(uci -q get network.$i.proto)
-        [ "$proto" = "wireguard" ] && continue
+    local i dev v4 v6
+    for i in $(uci -X -q show gateway | sed -n "s/^gateway\.\([^.=]*\)=client$/\1/p") wan; do
         [ "$(ifstatus $i 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] || continue
         dev=$(ifstatus $i 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
         [ -n "$dev" ] || continue
         v4=$(ip -4 route show table all dev "$dev" scope link 2>/dev/null | awk '$1 ~ /\//{print $1}' | sort -u | tr '\n' ' ')
-        v6=$(ip -6 route show table all dev "$dev" 2>/dev/null | awk '$1 ~ /\// && $1 !~ /^(fe80|ff|default)/{print $1}' | sort -u | tr '\n' ' ')
+        # IPv6 am WAN kommt vom Anbieter und wechselt – dort nur IPv4
+        [ "$i" = wan ] && v6="" || \
+            v6=$(ip -6 route show table all dev "$dev" 2>/dev/null | awk '$1 ~ /\// && $1 !~ /^(fe80|ff|default)/{print $1}' | sort -u | tr '\n' ' ')
         [ -n "$v4$v6" ] || continue
         echo "$i|$dev|${v4% }|${v6% }"
     done
 }
 net_field() { nets_detect | awk -F'|' -v n="$1" -v f="$2" '$1==n{print $f}'; }
+net_ok() { # netz -> Abbruch mit Begründung, wenn es kein Client-Netz und kein WAN ist (oder gerade aus)
+    [ -n "$(net_field "$1" 1)" ] && return 0
+    die "Netz '$1' geht nicht: Erlaubt sind nur Client-Netze und das WAN – also Netze, in denen Endgeräte stehen, keine Babel-, Mesh- oder Tunnelschnittstellen. Vorhanden: $(nets_detect | cut -d'|' -f1 | tr '\n' ' ')"
+}
 
 # ---------------------------------------------------------------------------
 #  Anwenden: network + Regeln + Firewall aus /etc/config/wgmanager erzeugen
@@ -207,8 +224,20 @@ set network.wgm_${t}_in6.in='$ifn'
 set network.wgm_${t}_in6.lookup='$tab'
 set network.wgm_${t}_in6.priority='31'
 EOF
+        # WAN als Netz (z. B. Geräte hinter der Fritzbox): dessen Route steht in main, nicht in der Freifunk-Tabelle
+        uci -q delete network.wgm_${t}_wan4
+        a4=""
+        echo " $(tget $t network) " | grep -q " wan " && a4=$(net_field wan 3 | awk '{print $1}')
+        [ -n "$a4" ] && uci batch <<EOF
+set network.wgm_${t}_wan4=rule
+set network.wgm_${t}_wan4.in='$ifn'
+set network.wgm_${t}_wan4.dest='$a4'
+set network.wgm_${t}_wan4.lookup='main'
+set network.wgm_${t}_wan4.priority='30'
+EOF
     done
     stage_babel "$tab"
+    stage_links "$tab"
 }
 
 peer_ip4() { # Router-IPv4 für Babel (wie babel_add_peeraddr der Firmware)
@@ -273,6 +302,74 @@ EOF
     done
 }
 
+link_ip() { # name a|b -> Tunneladresse dieser Seite der Netzverbindung (.1 = A, .2 = B)
+    local t=$(lget $1 transfer)
+    echo "${t%.*}.$(( ${t##*.} + $( [ "$2" = a ] && echo 1 || echo 2 ) ))"
+}
+
+stage_links() { # tabelle
+    local tab=$1 n ifn key psk p role
+    for n in $(netlinks); do
+        ifn=$(lget $n ifname); role=$(lget $n role)
+        key=$(lget $n keyfile)
+        [ -s "$key" ] || { warn "Schlüssel $key für Netzverbindung $n fehlt – übersprungen"; continue; }
+        uci -q delete network.$ifn
+        for p in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=wireguard_$ifn$/\1/p"); do
+            uci -q delete network.$p
+        done
+        for p in to4 in4 rt; do uci -q delete network.wgm_nv_${n}_$p; done
+        uci batch <<EOF
+set network.$ifn=interface
+set network.$ifn.proto='wireguard'
+set network.$ifn.private_key='$(tr -d '\n' < "$key")'
+set network.$ifn.mtu='$(lget $n mtu)'
+set network.$ifn.nohostroute='1'
+add_list network.$ifn.addresses='$(link_ip $n $role)/30'
+set network.nv_peer_$n=wireguard_$ifn
+set network.nv_peer_$n.public_key='$(lget $n peer_public_key)'
+EOF
+        psk=$(lget $n pskfile)
+        [ -n "$psk" ] && [ -s "$psk" ] && uci set network.nv_peer_$n.preshared_key="$(tr -d '\n' < "$psk")"
+        if [ "$role" = a ]; then
+            # Seite A: nimmt nur die Tunneladresse von B an; Antworten an B über main (dort steht das /30),
+            # Pakete von B in der Tabelle des freigegebenen Netzes (WAN: main, Client-Netz: Freifunk-Tabelle)
+            uci batch <<EOF
+set network.$ifn.listen_port='$(lget $n port)'
+add_list network.nv_peer_$n.allowed_ips='$(link_ip $n b)/32'
+set network.wgm_nv_${n}_to4=rule
+set network.wgm_nv_${n}_to4.dest='$(lget $n transfer)/30'
+set network.wgm_nv_${n}_to4.lookup='main'
+set network.wgm_nv_${n}_to4.priority='10'
+set network.wgm_nv_${n}_in4=rule
+set network.wgm_nv_${n}_in4.in='$ifn'
+set network.wgm_nv_${n}_in4.lookup='$( [ "$(lget $n lookup)" = main ] && echo main || echo $tab )'
+set network.wgm_nv_${n}_in4.priority='30'
+EOF
+        else
+            # Seite B: nur das Netz von A (bzw. sein Ersatznetz) geht in den Tunnel, alles andere wie bisher;
+            # Antworten aus dem Tunnel über die Freifunk-Tabelle (dort stehen die Client-Netze)
+            uci batch <<EOF
+set network.nv_peer_$n.endpoint_host='$(lget $n endpoint_host)'
+set network.nv_peer_$n.endpoint_port='$(lget $n endpoint_port)'
+set network.nv_peer_$n.persistent_keepalive='$(lget $n keepalive)'
+add_list network.nv_peer_$n.allowed_ips='$(lget $n dest)'
+add_list network.nv_peer_$n.allowed_ips='$(link_ip $n a)/32'
+set network.wgm_nv_${n}_rt=route
+set network.wgm_nv_${n}_rt.interface='$ifn'
+set network.wgm_nv_${n}_rt.target='$(lget $n dest)'
+set network.wgm_nv_${n}_to4=rule
+set network.wgm_nv_${n}_to4.dest='$(lget $n dest)'
+set network.wgm_nv_${n}_to4.lookup='main'
+set network.wgm_nv_${n}_to4.priority='10'
+set network.wgm_nv_${n}_in4=rule
+set network.wgm_nv_${n}_in4.in='$ifn'
+set network.wgm_nv_${n}_in4.lookup='$tab'
+set network.wgm_nv_${n}_in4.priority='31'
+EOF
+        fi
+    done
+}
+
 # bird: je Babel-Verbindung eine Datei in $BIRD_DIR (wie 50-wireguard der Firmware). Die Layer-3-Skripte
 # erzeugen den Ordner bei jedem Lauf neu – fehlende Dateien stellt "babel-pruefen" wieder her.
 write_bird() { # Rückgabe 0 = geändert
@@ -309,11 +406,12 @@ reload_bird() {
 }
 
 nft_block() {
-    local t ifn port acc admin n dev a4 a6 allow4 allow6 local6 devs ports="" mss
+    local t ifn port acc admin n dev a4 a6 allow4 allow6 local6 devs srcs ports="" mss
     # alle Client-Netze des Routers (für "nur Internet"/fremde Netze sperren)
     local6=$(nets_detect | awk -F'|' '{print $4}' | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
     for t in $(tunnels); do ports="$ports${ports:+, }$(tget $t port)"; done
     for t in $(babels); do [ "$(bget $t role)" = a ] && ports="$ports${ports:+, }$(bget $t port)"; done
+    for t in $(netlinks); do [ "$(lget $t role)" = a ] && ports="$ports${ports:+, }$(lget $t port)"; done
 
     echo "$NFT_BEGIN"
     echo "table inet wg_manager {"
@@ -327,6 +425,13 @@ nft_block() {
         echo "        iifname \"$ifn\" ip daddr != $(tget $t ip4 | cut -d/ -f1) counter drop comment \"$t: Router nur ueber Tunneladresse\""
         echo "        iifname \"$ifn\" ip6 daddr != { $(tget $t ip6 | cut -d/ -f1), fe80::/10 } counter drop comment \"$t: Router nur ueber Tunneladresse\""
     done
+    # Netzverbindungen: der andere Router darf diesen nur anpingen (Prüfen der Verbindung)
+    for t in $(netlinks); do
+        ifn=$(lget $t ifname)
+        echo "        iifname \"$ifn\" icmp type echo-request accept"
+        echo "        iifname \"$ifn\" ct state established,related accept"
+        echo "        iifname \"$ifn\" counter drop comment \"$t: kein Zugriff auf den Router\""
+    done
     echo "    }"
     echo "    chain forward {"
     echo "        type filter hook forward priority -5; policy accept;"
@@ -334,7 +439,7 @@ nft_block() {
     # als 1500 ist und manche Server die Meldung „Paket zu groß“ nicht beachten (z. B. microsoft.com)
     mss=$(uci -q get $CFG.settings.mss_clamp_all)
     [ -n "$mss" ] && echo "        tcp flags syn tcp option maxseg size set $mss comment \"alle Verbindungen (mss_clamp_all)\""
-    for ifn in $(for t in $(tunnels); do tget $t ifname; done; for t in $(babels); do bget $t ifname; done); do
+    for ifn in $(for t in $(tunnels); do tget $t ifname; done; for t in $(babels); do bget $t ifname; done; for t in $(netlinks); do lget $t ifname; done); do
         echo "        oifname \"$ifn\" tcp flags syn tcp option maxseg size set rt mtu"
         echo "        iifname \"$ifn\" tcp flags syn tcp option maxseg size set rt mtu"
     done
@@ -369,13 +474,56 @@ nft_block() {
                 ;;
         esac
     done
+    # Netzverbindungen: nur in eine Richtung (B → freigegebenes Netz von A), auf A nur in dieses Netz
+    for t in $(netlinks); do
+        ifn=$(lget $t ifname)
+        if [ "$(lget $t role)" = a ]; then
+            echo "        # Netzverbindung $t (Seite A): gibt $(lget $t real) frei"
+            echo "        iifname \"$ifn\" ip daddr $(lget $t real) accept"
+            echo "        iifname \"$ifn\" counter drop comment \"$t: nur das freigegebene Netz\""
+        else
+            srcs=""
+            for n in $(lget $t netz); do
+                dev=$(net_field "$n" 2)
+                [ -n "$dev" ] && srcs="$srcs${srcs:+, }\"$dev\""
+            done
+            echo "        # Netzverbindung $t (Seite B): $(lget $t netz) → $(lget $t dest)"
+            [ -n "$srcs" ] && echo "        oifname \"$ifn\" iifname { $srcs } accept"
+            echo "        oifname \"$ifn\" counter drop comment \"$t: nur aus den gewaehlten Netzen\""
+        fi
+        # Gegenrichtung nur als Antwort
+        [ "$(lget $t role)" = a ] && dev=oifname || dev=iifname
+        echo "        $dev \"$ifn\" ct state established,related accept"
+        echo "        $dev \"$ifn\" counter drop comment \"$t: nur in eine Richtung\""
+    done
     echo "    }"
+    # Ersatznetz 1:1 auf das echte Netz abbilden (die letzte Zahl bleibt gleich) – Kette nur, wenn nötig,
+    # damit sich die Datei auf Routern ohne Netzverbindung nicht ändert
+    n=$(for t in $(netlinks); do [ "$(lget $t role)" = a ] && echo "        iifname \"$(lget $t ifname)\" ip daddr $(lget $t ersatz) dnat ip prefix to $(lget $t real)"; done)
+    if [ -n "$n" ]; then
+        echo "    chain prerouting {"
+        echo "        type nat hook prerouting priority dstnat; policy accept;"
+        echo "$n"
+        echo "    }"
+    fi
     echo "    chain postrouting {"
     echo "        type nat hook postrouting priority srcnat; policy accept;"
     for t in $(tunnels); do
         ifn=$(tget $t ifname)
         echo "        oifname != \"$ifn\" ip saddr $(vpn4_net $t) masquerade"
         echo "        oifname != \"$ifn\" ip6 saddr $(vpn6_net $t) masquerade"
+    done
+    # Netzverbindungen: B schickt alles mit seiner Tunneladresse, A mit seiner Adresse im freigegebenen Netz –
+    # so brauchen weder A noch die Geräte dort (Drucker → Fritzbox) eine Route zurück
+    for t in $(netlinks); do
+        ifn=$(lget $t ifname)
+        if [ "$(lget $t role)" = a ]; then
+            dev=$(net_field "$(lget $t netz)" 2)
+            [ -n "$dev" ] && echo "        oifname \"$dev\" ip saddr $(lget $t transfer)/30 masquerade" \
+                || warn "Netz '$(lget $t netz)' für Netzverbindung $t nicht gefunden/aus"
+        else
+            echo "        oifname \"$ifn\" masquerade"
+        fi
     done
     echo "    }"
     echo "}"
@@ -388,6 +536,11 @@ nft_block() {
             dev=$(net_field "$n" 2)
             [ -n "$dev" ] && devs="$devs $(tget $t ifname):$dev"
         done
+    done
+    for t in $(netlinks); do
+        [ "$(lget $t role)" = a ] || continue
+        dev=$(net_field "$(lget $t netz)" 2)
+        [ -n "$dev" ] && devs="$devs $(lget $t ifname):$dev"
     done
     if [ -n "$devs" ]; then
         for fam in ip ip6; do
@@ -434,7 +587,7 @@ ensure_persistence() {
     ensure_cron
 }
 
-# Wächter für Babel-Verbindungen (MTU aushandeln, Selbstheilung) – nur solange es welche gibt.
+# Wächter für Babel- und Netzverbindungen (MTU aushandeln, Selbstheilung) – nur solange es welche gibt.
 # Die Freifunk-Firmware nutzt micrond mit einer Datei je Aufgabe in /usr/lib/micron.d (kein /etc/crontabs);
 # ohne diesen Ordner (OpenWrt-cron) eine Zeile in /etc/crontabs/root.
 cron_restart() { /etc/init.d/micrond restart >/dev/null 2>&1 || /etc/init.d/cron restart >/dev/null 2>&1; }
@@ -447,12 +600,12 @@ ensure_cron() {
         changed=1
     fi
     if [ -d "$MICRON_DIR" ]; then
-        if [ -n "$(babels)" ]; then
+        if [ -n "$(babels)$(netlinks)" ]; then
             [ "$(cat "$MICRON_DIR/wg_manager" 2>/dev/null)" = "$CRON_LINE" ] || { echo "$CRON_LINE" > "$MICRON_DIR/wg_manager"; changed=1; }
         elif [ -f "$MICRON_DIR/wg_manager" ]; then
             rm -f "/usr/lib/micron.d/wg_manager"; changed=1
         fi
-    elif [ -n "$(babels)" ]; then
+    elif [ -n "$(babels)$(netlinks)" ]; then
         grep -qF 'wg_manager babel-pruefen' "$CRON_FILE" 2>/dev/null || { mkdir -p "${CRON_FILE%/*}"; echo "$CRON_LINE" >> "$CRON_FILE"; changed=1; }
     elif grep -qF 'wg_manager babel-pruefen' "$CRON_FILE" 2>/dev/null; then
         sed -i '/wg_manager babel-pruefen/d' "$CRON_FILE"; changed=1
@@ -475,6 +628,7 @@ cmd_apply() {
     before=$(uci -q show network | sort | md5sum)
     for t in $(tunnels); do eval "sig_$t=$(tunnel_sig "$(tget $t ifname)")"; done
     for t in $(babels); do eval "bsig_$t=$(tunnel_sig "$(bget $t ifname)")"; done
+    for t in $(netlinks); do eval "nsig_$t=$(tunnel_sig "$(lget $t ifname)")"; done
     stage_network
     after=$(uci -q show network | sort | md5sum)
     if [ "$before" != "$after" ]; then
@@ -490,6 +644,10 @@ cmd_apply() {
         for t in $(babels); do
             ifn=$(bget $t ifname)
             [ "$(eval echo \$bsig_$t)" = "$(tunnel_sig "$ifn")" ] || ifup "$ifn"
+        done
+        for t in $(netlinks); do
+            ifn=$(lget $t ifname)
+            [ "$(eval echo \$nsig_$t)" = "$(tunnel_sig "$ifn")" ] || ifup "$ifn"
         done
         sleep 3
     else
@@ -679,6 +837,7 @@ cmd_babel_insert() { # ["zeile"] [--name N] [--rxcost N]  – Seite B
             --name) name="$2"; shift ;;
             --rxcost) rx="$2"; shift ;;
             "$SNIP_TAG"*) line="$1" ;;
+            "$NETZ_TAG"*) die "Das ist eine Zeile für eine Netzverbindung – einfügen mit: wg_manager netz-einfuegen" ;;
             *) die "Unbekannte Angabe $1 (die Zeile bitte in Anführungszeichen)" ;;
         esac
         shift
@@ -688,7 +847,11 @@ cmd_babel_insert() { # ["zeile"] [--name N] [--rxcost N]  – Seite B
         read -r line
     fi
     line=$(echo "$line" | tr -d '\r')
-    case "$line" in "$SNIP_TAG "*) ;; *) die "Das ist keine Zeile von wg_manager (erwartet: $SNIP_TAG …)." ;; esac
+    case "$line" in
+        "$SNIP_TAG "*) ;;
+        "$NETZ_TAG "*) die "Das ist eine Zeile für eine Netzverbindung – einfügen mit: wg_manager netz-einfuegen" ;;
+        *) die "Das ist keine Zeile von wg_manager (erwartet: $SNIP_TAG …)." ;;
+    esac
     ep=$(snip_field "$line" ep); pub=$(snip_field "$line" pub); key=$(snip_field "$line" key); psk=$(snip_field "$line" psk)
     host=$(ep_host "$ep"); port=$(ep_port "$ep")
     valid_key "$pub" && valid_key "$key" && valid_key "$psk" || die "Schlüssel in der Zeile unvollständig – beim Kopieren abgeschnitten?"
@@ -837,6 +1000,7 @@ cmd_babel_check() { # Wächter (cron): Selbstheilung + MTU aushandeln, sobald si
         ip link show "$ifn" >/dev/null 2>&1 || need=1
         [ -d /etc/bird/fff ] && [ ! -f "$BIRD_DIR/$ifn.conf" ] && need=1
     done
+    for b in $(netlinks); do ip link show "$(lget $b ifname)" >/dev/null 2>&1 || need=1; done
     if [ $need = 1 ]; then
         log "Schnittstellen oder bird-Dateien fehlten (Layer-3-Lauf der Firmware?) – wende neu an"
         cmd_apply
@@ -893,6 +1057,262 @@ cmd_babel_del() { # name
     cmd_apply
 }
 
+# ---------------------------------------------------------------------------
+#  Netzverbindungen: ein Netz von Router A für Geräte im Netz von Router B erreichbar machen
+#  (z. B. den Drucker im Fritzbox-Netz eines anderen Freifunk-Routers aus dem eigenen Heimnetz)
+# ---------------------------------------------------------------------------
+
+valid_net4() { echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'; }
+
+ip4_overlaps() { # netz < liste: gibt jedes Netz der Liste aus, das sich mit "netz" überschneidet
+    awk -v t="$1" '
+        function num(s,  a) { split(s, a, "."); return ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4] }
+        function net(n, p) { return n - n % 2 ^ (32 - p) }
+        BEGIN { split(t, x, "/"); tn = num(x[1]); tp = (x[2] == "") ? 32 : x[2] }
+        {
+            split($1, y, "/")
+            if (y[1] !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
+            p = (y[2] == "") ? 32 : y[2]; m = (p < tp) ? p : tp
+            if (net(num(y[1]), m) == net(tn, m)) print $1
+        }'
+}
+
+own_nets4() { # alle IPv4-Netze und -Adressen dieses Routers: Routen aller Tabellen, Adressen, Freifunk
+    {
+        ip -4 route show table all 2>/dev/null | awk '{ n = $1; if (n ~ /^(local|broadcast|unreachable|blackhole|prohibit|throw|multicast|anycast)$/) n = $2; if (n != "default") print n }'
+        ip -4 addr show 2>/dev/null | awk '$1 == "inet" { print $2 }'
+        echo "$FF4" | tr -d ' ' | tr ',' '\n'
+    } | sort -u
+}
+
+rnd() { # obergrenze -> Zufallszahl 0 … obergrenze-1 (busybox-awk taugt dafür nicht: srand mit großem Startwert)
+    echo $(( 0x$(dd if=/dev/urandom bs=8 count=1 2>/dev/null | md5sum | cut -c1-6) % $1 ))
+}
+ersatz_pick() { # präfixlänge -> zufälliges Netz gleicher Größe in $ERSATZ_BASIS.0.0/16
+    local size=$(( 1 << (32 - $1) )) cnt i o
+    cnt=$(( 65536 / size ))
+    if [ $cnt -gt 2 ]; then i=$(( 1 + $(rnd $((cnt - 2))) )); else i=0; fi
+    o=$(( i * size ))
+    echo "$ERSATZ_BASIS.$(( o / 256 )).$(( o % 256 ))/$1"
+}
+transfer_pick() { # -> zufälliges /30 aus 169.254.0.0/16 (Netzadresse)
+    echo "169.254.$(( 1 + $(rnd 254) )).$(( 4 * $(rnd 64) ))"
+}
+free_pick() { # funktion präfix: erstes zufälliges Netz, das sich mit keinem Netz dieses Routers überschneidet
+    local own=$(own_nets4) i c
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        if [ "$1" = transfer ]; then c=$(transfer_pick); else c=$(ersatz_pick "$2"); fi
+        [ -z "$(echo "$own" | ip4_overlaps "$c$( [ "$1" = transfer ] && echo /30)")" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
+link_free_name() { # name -> name, oder name2, name3 … wenn schon vergeben
+    local base=$1 c=$1 n=2
+    while uci -q get $CFG.n_$c >/dev/null || uci -q get network.nv_$c >/dev/null; do
+        [ $n -gt 9 ] && break
+        c="$(echo "$base" | cut -c1-11)$n"
+        n=$((n + 1))
+    done
+    echo "$c"
+}
+
+cmd_link_show() { # name: Zeile zum Einfügen (nur Seite A)
+    local n=$1 ep
+    uci -q get $CFG.n_$n >/dev/null || die "Netzverbindung $n gibt es nicht"
+    [ "$(lget $n role)" = a ] || die "$n ist Seite B – die Zeile gibt es nur auf Seite A."
+    [ -s "$(lget $n peerkeyfile)" ] || die "Schlüssel der Gegenseite fehlt – Verbindung neu anlegen."
+    ep=$(endpoint_addr)
+    case "$ep" in *:*) ep="[$ep]" ;; esac
+    echo "$NETZ_TAG name=$n von=$(uci -q get fff.system.hostname || hostname) ep=$ep:$(lget $n port) netz=$(lget $n real) ersatz=$(lget $n ersatz) tr=$(lget $n transfer) pub=$(wg pubkey < "$(lget $n keyfile)") key=$(cat "$(lget $n peerkeyfile)") psk=$(cat "$(lget $n pskfile)")"
+}
+
+# netz-neu <name> [--netz wan|<netz>] [--ersatz a.b.c.d/p] [--port N]  – Seite A
+cmd_link_add() {
+    local name="$1" netz=wan ersatz="" port="" real p tr lookup=fff
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --netz) netz="$2"; shift ;;
+            --ersatz) ersatz="$2"; shift ;;
+            --port) port="$2"; shift ;;
+            *) die "Unbekannte Option $1" ;;
+        esac
+        shift
+    done
+    valid_tunnel_name "$name" || die "Name: 1–12 Zeichen a-z, 0-9"
+    uci -q get $CFG.n_$name >/dev/null && die "Netzverbindung $name gibt es schon"
+    uci -q get network.nv_$name >/dev/null && die "network.nv_$name existiert bereits"
+    real=$(net_field "$netz" 3 | awk '{print $1}')
+    [ -n "$real" ] || die "Netz '$netz' gibt es nicht oder es hat keine IPv4-Adressen (freigeben lassen sich: $(nets_detect | cut -d'|' -f1 | tr '\n' ' '))"
+    [ -n "$(echo "$FF4" | tr -d ' ' | tr ',' '\n' | ip4_overlaps "$real")" ] && die "$real gehört zum Freifunk-Netz – das ist ohnehin von überall erreichbar."
+    p=${real#*/}
+    [ "$p" -ge 16 ] && [ "$p" -le 30 ] || die "Netz $real: freigeben lassen sich Netze von /16 bis /30."
+    [ "$netz" = wan ] && lookup=main
+    [ -n "$(endpoint_addr)" ] || die "Keine feste Freifunk-IPv6 gefunden (router_ip6 oder Client-Netz) – Seite A muss erreichbar sein."
+    if [ -n "$ersatz" ]; then
+        valid_net4 "$ersatz" && [ "${ersatz#*/}" = "$p" ] || die "Ersatznetz: gleiche Größe wie $real nötig (…/$p)"
+        [ -z "$(own_nets4 | ip4_overlaps "$ersatz")" ] || die "Ersatznetz $ersatz ist auf diesem Router schon belegt."
+    else
+        ersatz=$(free_pick ersatz "$p") || die "Kein freies Ersatznetz gefunden – mit --ersatz selbst angeben."
+    fi
+    tr=$(free_pick transfer) || die "Keine freien Tunneladressen in 169.254.0.0/16 gefunden."
+    [ -n "$port" ] || port=$(next_free_port)
+    wg genkey > $KEY_DIR/nv_$name.key
+    wg genkey > $KEY_DIR/nv_$name.peer
+    wg genpsk > $KEY_DIR/nv_$name.psk
+    uci batch <<EOF
+set $CFG.n_$name=netz
+set $CFG.n_$name.role='a'
+set $CFG.n_$name.ifname='nv_$name'
+set $CFG.n_$name.port='$port'
+set $CFG.n_$name.mtu='$MTU_DEFAULT'
+set $CFG.n_$name.netz='$netz'
+set $CFG.n_$name.real='$real'
+set $CFG.n_$name.ersatz='$ersatz'
+set $CFG.n_$name.transfer='$tr'
+set $CFG.n_$name.lookup='$lookup'
+set $CFG.n_$name.keyfile='$KEY_DIR/nv_$name.key'
+set $CFG.n_$name.peerkeyfile='$KEY_DIR/nv_$name.peer'
+set $CFG.n_$name.pskfile='$KEY_DIR/nv_$name.psk'
+set $CFG.n_$name.peer_public_key='$(wg pubkey < $KEY_DIR/nv_$name.peer)'
+EOF
+    uci commit $CFG
+    ok "Netzverbindung $name angelegt: gibt $netz ($real) frei, nv_$name lauscht auf Port $port."
+    say "Überschneidet sich $real mit einem Netz des anderen Routers, erreicht er es als $ersatz (letzte Zahl gleich)."
+    cmd_apply
+    say ""
+    say "Diese Zeile auf dem anderen Router einfügen (Menü: n → 2, oder: wg_manager netz-einfuegen):"
+    say ""
+    cmd_link_show "$name"
+    say ""
+    warn "Die Zeile enthält den privaten Schlüssel der Gegenseite – nur dorthin kopieren. Erneut anzeigen: wg_manager netz-zeige $name"
+}
+
+# netz-einfuegen ["zeile"] [--name N] [--netz "client ..."] [--ohne-ersatz]  – Seite B
+cmd_link_insert() {
+    local line="" name="" netz="" noersatz=0 ep host port pub key psk real ersatz tr dest own coll n i
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="$2"; shift ;;
+            --netz) netz="$2"; shift ;;
+            --ohne-ersatz) noersatz=1 ;;
+            "$NETZ_TAG"*) line="$1" ;;
+            "$SNIP_TAG"*) die "Das ist eine Zeile für eine Babel-Verbindung – einfügen mit: wg_manager babel-einfuegen" ;;
+            *) die "Unbekannte Angabe $1 (die Zeile bitte in Anführungszeichen)" ;;
+        esac
+        shift
+    done
+    if [ -z "$line" ]; then
+        [ -t 0 ] && printf "Zeile von Router A einfügen: "
+        read -r line
+    fi
+    line=$(echo "$line" | tr -d '\r')
+    case "$line" in
+        "$NETZ_TAG "*) ;;
+        "$SNIP_TAG "*) die "Das ist eine Zeile für eine Babel-Verbindung – einfügen mit: wg_manager babel-einfuegen" ;;
+        *) die "Das ist keine Zeile für eine Netzverbindung (erwartet: $NETZ_TAG …)." ;;
+    esac
+    ep=$(snip_field "$line" ep); pub=$(snip_field "$line" pub); key=$(snip_field "$line" key); psk=$(snip_field "$line" psk)
+    real=$(snip_field "$line" netz); ersatz=$(snip_field "$line" ersatz); tr=$(snip_field "$line" tr)
+    host=$(ep_host "$ep"); port=$(ep_port "$ep")
+    valid_key "$pub" && valid_key "$key" && valid_key "$psk" || die "Schlüssel in der Zeile unvollständig – beim Kopieren abgeschnitten?"
+    [ -n "$host" ] && echo "$port" | grep -qE '^[0-9]+$' || die "Ziel (ep=…) in der Zeile fehlerhaft."
+    valid_net4 "$real" && valid_net4 "$ersatz" && echo "$tr" | grep -qE '^169\.254\.[0-9]{1,3}\.[0-9]{1,3}$' \
+        || die "Netzangaben in der Zeile fehlerhaft (netz/ersatz/tr)."
+    ip -6 addr show | grep -qF " $host/" && die "Das ist die Zeile dieses Routers selbst – sie gehört auf den anderen Router."
+    # Netze dieses Routers, aus denen man das Netz von A erreichen soll (ohne Angabe: alle Client-Netze)
+    [ -n "$netz" ] || netz=$(nets_detect | cut -d'|' -f1 | grep -vx wan | tr '\n' ' ')
+    for n in $netz; do net_ok "$n"; done
+    [ -n "$(echo $netz)" ] || die "Kein Netz auf diesem Router gefunden, aus dem man zugreifen könnte."
+    # Überschneidungen prüfen: gegen alle Netze dieses Routers (Heimnetz, WAN, Tunnel, Freifunk)
+    own=$(own_nets4)
+    [ -z "$(echo "$own" | ip4_overlaps "$tr/30")" ] || die "Die Tunneladressen $tr/30 sind auf diesem Router belegt – auf Router A die Verbindung löschen und neu anlegen."
+    coll=$(echo "$own" | ip4_overlaps "$real" | head -1)
+    if [ -z "$coll" ]; then
+        dest=$real
+    else
+        say "Das Netz $real von $(snip_field "$line" von) überschneidet sich mit diesem Router ($coll)."
+        [ $noersatz = 1 ] && die "Abgelehnt (--ohne-ersatz): gleiche Netze lassen sich nicht direkt verbinden."
+        coll=$(echo "$own" | ip4_overlaps "$ersatz" | head -1)
+        [ -z "$coll" ] || die "Auch das Ersatznetz $ersatz ist hier belegt ($coll) – auf Router A mit --ersatz <anderes Netz> neu anlegen."
+        if [ -t 0 ]; then
+            printf "Stattdessen das Ersatznetz %s verwenden (z. B. %s.25 = %s.25)? [J/n]: " "$ersatz" "$(echo "$ersatz" | cut -d. -f1-3)" "$(echo "$real" | cut -d. -f1-3)"
+            read -r i
+            case "$i" in n|N) die "Abgelehnt." ;; esac
+        fi
+        dest=$ersatz
+    fi
+    if [ -z "$name" ]; then
+        name=$(babel_name_from_host "$(snip_field "$line" von)")
+        valid_tunnel_name "$name" || name=$(snip_field "$line" name)
+        name=$(link_free_name "$name")
+        if [ -t 0 ]; then
+            printf "Name der Verbindung auf diesem Router [%s]: " "$name"; read -r i; [ -n "$i" ] && name=$i
+        fi
+    fi
+    valid_tunnel_name "$name" || die "Name: 1–12 Zeichen a-z, 0-9"
+    uci -q get $CFG.n_$name >/dev/null && die "Netzverbindung $name gibt es schon"
+    uci -q get network.nv_$name >/dev/null && die "network.nv_$name existiert bereits"
+    echo "$key" > $KEY_DIR/nv_$name.key
+    echo "$psk" > $KEY_DIR/nv_$name.psk
+    uci batch <<EOF
+set $CFG.n_$name=netz
+set $CFG.n_$name.role='b'
+set $CFG.n_$name.ifname='nv_$name'
+set $CFG.n_$name.endpoint_host='$host'
+set $CFG.n_$name.endpoint_port='$port'
+set $CFG.n_$name.keepalive='25'
+set $CFG.n_$name.mtu='$MTU_DEFAULT'
+set $CFG.n_$name.real='$real'
+set $CFG.n_$name.ersatz='$ersatz'
+set $CFG.n_$name.dest='$dest'
+set $CFG.n_$name.transfer='$tr'
+set $CFG.n_$name.keyfile='$KEY_DIR/nv_$name.key'
+set $CFG.n_$name.pskfile='$KEY_DIR/nv_$name.psk'
+set $CFG.n_$name.peer_public_key='$pub'
+set $CFG.n_$name.von='$(snip_field "$line" von)'
+EOF
+    for n in $netz; do uci add_list $CFG.n_$name.netz="$n"; done
+    uci commit $CFG
+    ok "Netzverbindung $name angelegt: nv_$name → $ep."
+    cmd_apply
+    say "Warte auf die Gegenstelle (bis 30 s) …"
+    for i in $(seq 1 15); do
+        babel_connected nv_$name && break
+        sleep 2
+    done
+    if babel_connected nv_$name; then
+        ok "Verbunden mit $(snip_field "$line" von)."
+        if [ "$dest" = "$real" ]; then
+            say "Geräte in $(echo $netz) erreichen jetzt $real wie gewohnt."
+        else
+            say "Geräte in $(echo $netz) erreichen $real jetzt als $dest – die letzte Zahl bleibt gleich."
+        fi
+    else
+        warn "Noch keine Verbindung. Ist Port $port auf Router A ($host) über Freifunk erreichbar? Stand: wg_manager liste"
+    fi
+}
+
+cmd_link_del() { # name
+    local n=$1 ifn p
+    uci -q get $CFG.n_$n >/dev/null || die "Netzverbindung $n gibt es nicht"
+    ifn=$(lget $n ifname)
+    mkdir -p "$ARCHIV_DIR"
+    for p in "$(lget $n keyfile)" "$(lget $n pskfile)" "$(lget $n peerkeyfile)"; do
+        [ -n "$p" ] && [ -f "$p" ] && mv -f "$p" "$ARCHIV_DIR/"
+    done
+    uci delete $CFG.n_$n
+    uci commit $CFG
+    for p in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=wireguard_$ifn$/\1/p"); do uci -q delete network.$p; done
+    uci -q delete network.$ifn
+    for p in to4 in4 rt; do uci -q delete network.wgm_nv_${n}_$p; done
+    uci commit network
+    /etc/init.d/network reload
+    ok "Netzverbindung $n gelöscht (Schlüssel in $ARCHIV_DIR)."
+    cmd_apply
+}
+
 next_free_subnet() {
     local n used
     used=" $(for t in $(tunnels); do vpn4_base $t; done | tr '\n' ' ') "
@@ -903,7 +1323,7 @@ next_free_subnet() {
     done
 }
 next_free_port() {
-    local p used=" $(for t in $(tunnels); do tget $t port; done; for t in $(babels); do bget $t port; done | tr '\n' ' ') "
+    local p used=" $(for t in $(tunnels); do tget $t port; done; for t in $(babels); do bget $t port; done; for t in $(netlinks); do lget $t port; done | tr '\n' ' ') "
     for p in $(seq 51821 51899); do
         case "$used" in *" $p "*) continue ;; esac
         netstat -uln 2>/dev/null | grep -q ":$p " && continue
@@ -935,7 +1355,7 @@ cmd_tunnel_add() {
     uci -q get network.wg_$name >/dev/null && die "Schnittstelle wg_$name existiert bereits in network"
     case "$acc" in netz|internet|beides) ;; *) die "Zugriff: netz, internet oder beides" ;; esac
     [ "$acc" != "internet" ] && [ -z "$netz" ] && die "Für Zugriff '$acc' muss ein Netz gewählt werden (--netz)"
-    for n in $netz; do [ -n "$(net_field $n 1)" ] || die "Netz '$n' gibt es nicht (siehe: wg_manager netze)"; done
+    for n in $netz; do net_ok "$n"; done
     n=$(next_free_subnet); [ -n "$n" ] || die "Kein freies Teilnetz 10.10.x.0/24"
     [ -n "$port" ] || port=$(next_free_port)
     [ -n "$dns" ] || dns="10.10.$n.1, fd00:cafe:$n::1"
@@ -968,7 +1388,7 @@ cmd_tunnel_edit() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --netz)
-                for n in $2; do [ -n "$(net_field $n 1)" ] || die "Netz '$n' gibt es nicht"; done
+                for n in $2; do net_ok "$n"; done
                 uci -q delete $CFG.t_$name.network
                 for n in $2; do uci add_list $CFG.t_$name.network="$n"; done
                 shift ;;
@@ -1005,7 +1425,7 @@ cmd_tunnel_del() {
     uci commit $CFG
     for p in $(uci -q show network | sed -n "s/^network\.\([^.=]*\)=wireguard_$ifn$/\1/p"); do uci -q delete network.$p; done
     uci -q delete network.$ifn
-    for p in to4 to6 in4 in6; do uci -q delete network.wgm_${name}_$p; done
+    for p in to4 to6 in4 in6 wan4; do uci -q delete network.wgm_${name}_$p; done
     uci commit network
     /etc/init.d/network reload
     ok "Tunnel $name gelöscht (Schlüssel in $ARCHIV_DIR)."
@@ -1361,7 +1781,7 @@ ago() {
 
 cmd_nets() {
     local i=0
-    say "Netze dieses Routers (zum Einhängen eines Tunnels):"
+    say "Netze dieses Routers (Client-Netze und WAN – Babel-, Mesh- und Tunnelschnittstellen sind ausgeschlossen):"
     nets_detect | while IFS='|' read -r name dev v4 v6; do
         i=$((i+1))
         printf "  %-12s %-10s %-20s %s\n" "$name" "$dev" "${v4:--}" "${v6:--}"
@@ -1370,7 +1790,7 @@ cmd_nets() {
 
 cmd_list() {
     local t p ifn st dump line pub hs rx tx ep
-    [ -n "$(tunnels)$(babels)" ] || { say "Noch keine Tunnel. (Altbestand übernehmen: wg_manager migrate)"; return; }
+    [ -n "$(tunnels)$(babels)$(netlinks)" ] || { say "Noch keine Tunnel. (Altbestand übernehmen: wg_manager migrate)"; return; }
     for t in $(tunnels); do
         ifn=$(tget $t ifname)
         ip link show "$ifn" >/dev/null 2>&1 && st="${GREEN}aktiv${NC}" || st="${RED}aus${NC}"
@@ -1404,6 +1824,24 @@ cmd_list() {
             say "    ${GREEN}verbunden${NC} (zuletzt $(ago ${hs:-0}))   Gegenstelle antwortet: $ep   Babel-Routen: $(babel_routes "$ifn")   MTU: $(bget $t mtu)   rxcost: $(bget $t rxcost)"
         else
             say "    ${RED}nicht verbunden${NC} (zuletzt $(ago ${hs:-0}))   MTU: $(bget $t mtu)   rxcost: $(bget $t rxcost)"
+        fi
+    done
+    [ -n "$(netlinks)" ] && say "${BLUE}Netzverbindungen (Netz → Netz)${NC}"
+    for t in $(netlinks); do
+        ifn=$(lget $t ifname)
+        if [ "$(lget $t role)" = a ]; then
+            say "  $t ($ifn, Seite A, Port $(lget $t port)) – gibt $(lget $t netz) $(lget $t real) frei (Ersatznetz $(lget $t ersatz))"
+            line=$(net_field "$(lget $t netz)" 3 | awk '{print $1}')
+            [ "$line" = "$(lget $t real)" ] || say "    ${YEL}Achtung: $(lget $t netz) ist jetzt ${line:-nicht da} – Verbindung neu anlegen.${NC}"
+        else
+            say "  $t ($ifn, Seite B → $(lget $t von) [$(lget $t endpoint_host)]:$(lget $t endpoint_port)) – aus $(echo $(lget $t netz)) nach $(lget $t dest)$( [ "$(lget $t dest)" != "$(lget $t real)" ] && echo " (= $(lget $t real) dort)")"
+        fi
+        hs=$(babel_hs "$ifn")
+        line=$(wg show "$ifn" transfer 2>/dev/null | awk '{print $2, $3}' | head -1)
+        if babel_connected "$ifn"; then
+            say "    ${GREEN}verbunden${NC} (zuletzt $(ago ${hs:-0}))   ↓$(human_bytes ${line%% *}) ↑$(human_bytes ${line##* })"
+        else
+            say "    ${RED}nicht verbunden${NC} (zuletzt $(ago ${hs:-0}))"
         fi
     done
 }
@@ -1605,6 +2043,24 @@ menu_babel() {
     esac
 }
 
+menu_links() {
+    local c n name netz
+    echo "Netzverbindungen – ein Netz eines anderen Routers aus einem Netz dieses Routers erreichen"
+    echo "  (z. B. den Drucker hinter der Fritzbox eines anderen Freifunk-Routers aus dem eigenen Heimnetz)"
+    echo "  1) Netz freigeben (dieser Router lauscht, gibt eine Zeile zum Einfügen aus)"
+    echo "  2) Zeile vom anderen Router einfügen (verbindet sich, prüft auf gleiche Netze)"
+    echo "  3) Zeile erneut anzeigen   4) Netzverbindung löschen"
+    printf "Auswahl: "; read -r c
+    case "$c" in
+        1) printf "Name der Verbindung (a-z, 0-9, max. 12, z. B. drucker): "; read -r name
+           netz=$(choose_from "Welches Netz freigeben?" "$(nets_detect | cut -d'|' -f1,3 | tr '|' ' ')") || return
+           ( cmd_link_add "$name" --netz "${netz%% *}" ) ;;
+        2) ( cmd_link_insert ) ;;
+        3) n=$(choose_from "Welche Verbindung?" "$(for n in $(netlinks); do [ "$(lget $n role)" = a ] && echo $n; done)") && ( cmd_link_show "$n" ) ;;
+        4) n=$(choose_from "Welche Verbindung löschen?" "$(netlinks)") && { printf "%s wirklich löschen? [j/N]: " "$n"; read -r c; [ "$c" = j ] && ( cmd_link_del "$n" ); } ;;
+    esac
+}
+
 menu() {
     local c t p name
     while true; do
@@ -1619,7 +2075,7 @@ menu() {
         echo " 3) Gerät sperren/entsperren 7) Tunnel löschen"
         echo " 4) Gerät löschen           8) Netze anzeigen"
         echo " 9) Alles neu anwenden (reparieren)   0) Beenden"
-        echo " b) Babel-Verbindungen (Router ↔ Router)"
+        echo " b) Babel-Verbindungen (Router ↔ Router)   n) Netzverbindungen (Netz → Netz)"
         printf "Auswahl: "; read -r c
         case "$c" in
             1) t=$(choose_from "In welchen Tunnel?" "$(tunnels)") || { pause; continue; }
@@ -1634,6 +2090,7 @@ menu() {
             8) cmd_nets; pause ;;
             9) ( cmd_apply ); pause ;;
             b|B) menu_babel; pause ;;
+            n|N) menu_links; pause ;;
             0|q) exit 0 ;;
         esac
     done
@@ -1649,7 +2106,7 @@ wg_manager – WireGuard-Zugänge verwalten (ohne Argumente: Menü)
   qr <gerät>                         Gerätekonfiguration als QR-Code für die WireGuard-App
   geraet-neu <tunnel> <name> [--ohne-psk]
   geraet-sperren <name> | geraet-entsperren <name> | geraet-loeschen <name>
-  tunnel-neu <name> [--netz "client ..."] [--zugriff beides|netz|internet] [--admin 0|1] [--freifunk 0|1] [--port N] [--dns "..."] [--mtu N|auto]
+  tunnel-neu <name> [--netz "client wan ..."] [--zugriff beides|netz|internet] [--admin 0|1] [--freifunk 0|1] [--port N] [--dns "..."] [--mtu N|auto]
   tunnel-aendern <name> [--netz "..."] [--zugriff ...] [--admin 0|1] [--freifunk 0|1] [--dns "..."] [--mtu N|auto]
   mtu-messen [ziel]                  Strecke des Routers ins Internet messen, passende Tunnel-MTU vorschlagen
                                      (MTU $MTU_MIN–$MTU_MAX, ohne Angabe $MTU_DEFAULT; auto = gemessen; DSL 1412 → 1332, 1500 → 1420)
@@ -1666,6 +2123,15 @@ Babel-Verbindungen (zwei Freifunk-Router koppeln, z. B. einen Router hinter LTE)
   babel-aendern <name> --rxcost N    Babel-Kosten ändern (1–65535, beide Seiten; auf dem anderen Router gleich einstellen)
   babel-loeschen <name>
   babel-pruefen [-q]                 Wächter (cron, alle 5 min): stellt Fehlendes wieder her, handelt die MTU aus
+
+Netzverbindungen (ein Netz von Router A aus einem Netz von Router B erreichen, z. B. einen Drucker; nur IPv4):
+  netz-neu <name> [--netz wan|<netz>] [--ersatz a.b.c.d/p] [--port N]
+                                     Seite A: gibt ein Netz frei (ohne Angabe: WAN), gibt eine Zeile zum Einfügen aus
+  netz-einfuegen ["<zeile>"] [--name N] [--netz "client ..."] [--ohne-ersatz]
+                                     Seite B: Zeile von A einfügen; bei gleichen Netzen gilt das Ersatznetz
+                                     (letzte Zahl gleich), mit --ohne-ersatz wird dann abgelehnt
+  netz-zeige <name>                  Zeile erneut ausgeben (Seite A)
+  netz-loeschen <name>
   migrate [--dns "..."]              Altbestand (wg_manager v1/privwg) übernehmen
 EOF
 }
@@ -1682,6 +2148,7 @@ case "$1" in
     zeige|show) ensure_env; shift; cmd_show "$@" ;;
     qr) ensure_env; shift; cmd_qr "$1" ;;
     babel-zeige) ensure_env; shift; cmd_babel_show "$1" ;;
+    netz-zeige) ensure_env; shift; cmd_link_show "$1" ;;
     *)
         # Sperre auch bei Abbruch (Strg-C, abgeschnittene Ausgabe) freigeben, sonst hängen alle weiteren Aufrufe
         [ -x /bin/lock ] && { lock "$LOCK"; trap 'lock -u "$LOCK"' EXIT; trap 'exit 1' INT TERM HUP PIPE; }
@@ -1704,6 +2171,9 @@ case "$1" in
             babel-aendern) cmd_babel_edit "$@" ;;
             babel-loeschen) cmd_babel_del "$1" ;;
             babel-pruefen) cmd_babel_check ;;
+            netz-neu) cmd_link_add "$@" ;;
+            netz-einfuegen) cmd_link_insert "$@" ;;
+            netz-loeschen) cmd_link_del "$1" ;;
             *) usage; exit 1 ;;
         esac
         ;;
