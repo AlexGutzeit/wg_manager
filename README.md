@@ -11,6 +11,9 @@ und Firmware-Updates übersteht. Es kann drei Dinge:
   hinter dessen Fritzbox aus dem eigenen Heimnetz. Haben beide Netze denselben Adressbereich (bei Fritzboxen die
   Regel), gilt automatisch ein Ersatznetz.
 
+**Anleitung mit Bildschirmfotos zu jedem Schritt:** [docs/wg_manager-anleitung.pdf](docs/wg_manager-anleitung.pdf)
+(36 Seiten – Installation, Gerätetunnel samt aller Änderungsmöglichkeiten, Babel- und Netzverbindungen, Betrieb).
+
 ## Inhalt
 
 1. [Installation](#installation)
