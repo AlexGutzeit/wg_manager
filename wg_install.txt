@@ -1,5 +1,5 @@
 # =====================================================================
-#  wg_manager 2.4 – WireGuard-Zugänge für Freifunk-Franken-Router (Layer 3)
+#  wg_manager 2.5 – WireGuard-Zugänge für Freifunk-Franken-Router (Layer 3)
 #  Quelle: https://github.com/AlexGutzeit/wg_manager  (GPL-3.0-or-later)
 #
 #  Installation – eine der beiden Arten:
@@ -25,8 +25,8 @@ cat << 'WG_MANAGER_ENDE' > /usr/sbin/wg_manager
 #!/bin/sh
 # ============================================================================
 #  wg_manager – WireGuard-Zugänge auf Freifunk-Franken-Routern (Layer3)
-#  Version 2.4 (27.10.2026) – Netzverbindungen (Netz ↔ Netz, Ersatznetz bei gleichen Netzen); WAN als Netz
-#  für Gerätetunnel. 2.3: Babel-Verbindungen zwischen Freifunk-Routern; MTU je Tunnel; QR-Code eingebaut
+#  Version 2.5 (27.10.2026) – Menü mit Pfeiltasten (Enter, Esc) für alles, ohne Terminal-Fachwissen.
+#  2.4: Netzverbindungen (Netz ↔ Netz, Ersatznetz); WAN als Netz für Gerätetunnel. 2.3: Babel-Verbindungen
 #
 #  Alle Einstellungen stehen in /etc/config/wgmanager (Tunnel + Geräte).
 #  Daraus erzeugt "wg_manager apply" bei jedem Start:
@@ -39,13 +39,14 @@ cat << 'WG_MANAGER_ENDE' > /usr/sbin/wg_manager
 #  stehen in /etc/sysupgrade.conf und überstehen so ein Firmware-Update; danach
 #  stellt der Start-Aufruf in /etc/rc.local.fff_userconfig alles wieder her.
 #
-#  Aufruf ohne Argumente: Menü.  "wg_manager hilfe": Befehle für die Kommandozeile.
+#  Aufruf ohne Argumente: Menü (Pfeiltasten, Enter, Esc).  "wg_manager hilfe": Befehle für die Kommandozeile.
 #
 #  Quelle: https://github.com/AlexGutzeit/wg_manager
 #  Copyright (C) 2026 AlexGutzeit – Lizenz: GPL-3.0-or-later (siehe LICENSE).
 #  Dieses Programm ist freie Software und kommt OHNE JEDE GEWÄHRLEISTUNG.
 # ============================================================================
 
+WGM_VERSION=2.5
 CFG=wgmanager
 CFG_FILE=/etc/config/$CFG
 KEY_DIR=/etc/wireguard
@@ -2085,7 +2086,7 @@ menu_links() {
     esac
 }
 
-menu() {
+menu_classic() { # Zahlenmenü – ohne Terminal oder auf Wunsch (wg_manager menue-einfach)
     local c t p name
     while true; do
         clear
@@ -2120,9 +2121,642 @@ menu() {
     done
 }
 
+# ---------------------------------------------------------------------------
+#  Menü mit Pfeiltasten – ohne Zusatzprogramme: nur "read -n1" der busybox-Shell und ANSI-Steuerzeichen.
+#  ↑↓ wählen, Enter öffnen, Esc zurück, q beenden. Die Befehle für die Kommandozeile bleiben unverändert.
+#  Die busybox kennt bei read -t keine Sekundenbruchteile: Esc wird erkannt, weil bei Pfeiltasten die
+#  restlichen Zeichen schon bereitliegen (read -t 0 = „liegt etwas an?“).
+# ---------------------------------------------------------------------------
+
+ESC=$(printf '\033')
+K_DEL=$(printf '\177')
+K_BS=$(printf '\010')
+T_BAR="${ESC}[44;97m"; T_SEL="${ESC}[7m"; T_B="${ESC}[1m"; T_DIM="${ESC}[2m"; T_OFF="${ESC}[0m"
+T_HIDE="${ESC}[?25l"; T_SHOW="${ESC}[?25h"; T_GREEN="${ESC}[0;32m"; T_RED="${ESC}[0;31m"
+
+tui_key() { # eine Taste lesen -> KEY: up down left right home end enter esc space bs other oder das Zeichen
+    local k s
+    KEY=other
+    if [ "$TUI_HAVE" = 1 ]; then
+        k=$TUI_PEND; TUI_HAVE=0      # nach Esc schon gelesenes Zeichen
+    else
+        IFS= read -rsn1 k || { KEY=esc; return; }
+    fi
+    case "$k" in
+        "") KEY=enter ;;
+        "$ESC")
+            IFS= read -rsn1 -t 0 TUI_X || { KEY=esc; return; }
+            IFS= read -rsn1 s
+            case "$s" in
+                "["|O)
+                    IFS= read -rsn1 s
+                    case "$s" in
+                        A) KEY=up ;; B) KEY=down ;; C) KEY=right ;; D) KEY=left ;; H) KEY=home ;; F) KEY=end ;;
+                        [0-9]) while IFS= read -rsn1 -t 1 k && [ "$k" != "~" ]; do :; done ;;   # Entf, Bild auf/ab …
+                    esac ;;
+                *) KEY=esc; TUI_PEND=$s; TUI_HAVE=1 ;;   # Esc und gleich danach eine andere Taste
+            esac ;;
+        "$K_DEL"|"$K_BS") KEY=bs ;;
+        " ") KEY=space ;;
+        *) KEY=$k ;;
+    esac
+}
+
+tui_header() { # titel
+    printf '%s%s%s' "${ESC}[H${ESC}[2J" "$T_HIDE" "$T_OFF"
+    printf '%s wg_manager %s · %s %s\n\n' "$T_BAR" "$WGM_VERSION" "$TUI_HOST" "$T_OFF"
+    printf '%s%s%s\n' "$T_B" "$1" "$T_OFF"
+}
+tui_stop() { printf '%s%s%s' "$T_OFF" "$T_SHOW" "${ESC}[H${ESC}[2J"; echo "wg_manager beendet. Befehle für die Kommandozeile: wg_manager hilfe"; }
+tui_quit() { exit 0; }
+tui_wait() { while :; do tui_key; case "$KEY" in enter|esc|space|q|Q) return 0 ;; esac; done; }
+
+tui_menu() { # titel kopf eintrag… ("Text|Hinweis") -> TUI_SEL (1…n); Rückgabe 1 bei Esc
+    local title="$1" head="$2" sel=${TUI_START:-1} n i it hint
+    TUI_START=1
+    shift 2
+    n=$#
+    [ "$sel" -ge 1 ] && [ "$sel" -le "$n" ] || sel=1
+    while :; do
+        tui_header "$title"
+        [ -n "$head" ] && printf '%s\n' "$head"
+        printf '\n'
+        i=0; hint=""
+        for it in "$@"; do
+            i=$((i + 1))
+            if [ $i = $sel ]; then
+                printf ' %s ▸ %s %s\n' "$T_SEL" "${it%%|*}" "$T_OFF"
+                case "$it" in *"|"*) hint=${it#*|} ;; esac
+            else
+                printf '   %s\n' "${it%%|*}"
+            fi
+        done
+        [ -n "$hint" ] && printf '\n %s%s%s\n' "$T_DIM" "$hint" "$T_OFF"
+        printf '\n%s↑↓ wählen · Enter öffnen · Esc zurück · q beenden%s' "$T_DIM" "$T_OFF"
+        tui_key
+        case "$KEY" in
+            up|k) [ $sel -gt 1 ] && sel=$((sel - 1)) || sel=$n ;;
+            down|j) [ $sel -lt $n ] && sel=$((sel + 1)) || sel=1 ;;
+            home) sel=1 ;;
+            end) sel=$n ;;
+            enter|right) TUI_SEL=$sel; return 0 ;;
+            esc|left) TUI_SEL=0; return 1 ;;
+            q|Q) tui_quit ;;
+            [1-9]) [ "$KEY" -le "$n" ] && { TUI_SEL=$KEY; return 0; } ;;
+        esac
+    done
+}
+
+tui_check() { # titel kopf vorauswahl eintrag… ("wert|Anzeige") -> TUI_VAL (gewählte Werte); Rückgabe 1 bei Esc
+    local title="$1" head="$2" on=" $3 " sel=1 n i it v box
+    shift 3
+    n=$#
+    while :; do
+        tui_header "$title"
+        [ -n "$head" ] && printf '%s\n' "$head"
+        printf '\n'
+        i=0
+        for it in "$@"; do
+            i=$((i + 1)); v=${it%%|*}
+            case "$on" in *" $v "*) box="[x]" ;; *) box="[ ]" ;; esac
+            if [ $i = $sel ]; then printf ' %s %s %s %s\n' "$T_SEL" "$box" "${it#*|}" "$T_OFF"
+            else printf '   %s %s\n' "$box" "${it#*|}"; fi
+        done
+        printf '\n%s↑↓ wählen · Leertaste: Häkchen setzen/entfernen · Enter übernehmen · Esc abbrechen%s' "$T_DIM" "$T_OFF"
+        tui_key
+        case "$KEY" in
+            up|k) [ $sel -gt 1 ] && sel=$((sel - 1)) || sel=$n ;;
+            down|j) [ $sel -lt $n ] && sel=$((sel + 1)) || sel=1 ;;
+            space|x)
+                i=0; for it in "$@"; do i=$((i + 1)); [ $i = $sel ] && break; done
+                v=${it%%|*}
+                case "$on" in *" $v "*) on=$(echo "$on" | sed "s/ $v / /") ;; *) on="$on$v " ;; esac ;;
+            enter) TUI_VAL=$(echo $on); return 0 ;;
+            esc|left) return 1 ;;
+            q|Q) tui_quit ;;
+        esac
+    done
+}
+
+tui_input() { # titel frage vorgabe [hinweis] -> TUI_VAL; Rückgabe 1 bei Esc
+    local val="$3"
+    tui_header "$1"
+    printf '%s\n' "$2"
+    [ -n "$4" ] && printf '%s%s%s\n' "$T_DIM" "$4" "$T_OFF"
+    printf '\n%sEnter übernehmen · Esc abbrechen · Rücktaste löscht · Einfügen mit Strg+Umschalt+V oder Rechtsklick%s\n' "$T_DIM" "$T_OFF"
+    printf '\n > %s%s' "$T_SHOW" "$val"
+    while :; do
+        tui_key
+        case "$KEY" in
+            enter) break ;;
+            esc) printf '%s' "$T_HIDE"; return 1 ;;
+            bs) [ -n "$val" ] && { val=${val%?}; printf '\b \b'; } ;;
+            space) val="$val "; printf ' ' ;;
+            up|down|left|right|home|end|other) ;;
+            *) val="$val$KEY"; printf '%s' "$KEY" ;;
+        esac
+    done
+    printf '%s' "$T_HIDE"
+    TUI_VAL=$val
+}
+
+tui_msg() { # titel text
+    tui_header "$1"
+    printf '\n%s\n\n%s Weiter mit Enter %s' "$2" "$T_SEL" "$T_OFF"
+    tui_wait
+}
+tui_confirm() { # titel frage ja-text (Vorauswahl: ja)
+    TUI_START=1
+    tui_menu "$1" "$2" "$3|" "Abbrechen|" && [ "$TUI_SEL" = 1 ]
+}
+tui_danger() { # titel frage ja-text (Vorauswahl: abbrechen)
+    TUI_START=1
+    tui_menu "$1" "$2" "Abbrechen|" "$3|" && [ "$TUI_SEL" = 2 ]
+}
+
+tui_run() { # titel befehl…: Befehl ausführen (mit Sperre wie auf der Kommandozeile), Ausgabe zeigen, auf Taste warten
+    local t="$1"
+    shift
+    tui_header "$t"
+    printf '\n'
+    ( [ -x /bin/lock ] && { lock "$LOCK"; trap 'lock -u "$LOCK"' EXIT; }; "$@" )
+    TUI_RC=$?
+    printf '\n%s Weiter mit Enter %s' "$T_SEL" "$T_OFF"
+    tui_wait
+    return $TUI_RC
+}
+tui_nostdin() { "$@" </dev/null; }
+tui_hint() { # hinweis befehl…: nach Erfolg einen Hinweis zeigen
+    local h="$1"
+    shift
+    "$@" && { echo ""; warn "$h"; }
+}
+NEU_EINLESEN="Geräte bekommen die Änderung erst, wenn sie ihre Konfiguration neu einlesen (QR-Code erneut scannen bzw. Datei neu importieren)."
+
+onoff() { [ "$1" = 1 ] && echo an || echo aus; }
+anzahl() { [ "$1" = 1 ] && echo "1 $2" || echo "$1 $3"; }   # zahl einzahl mehrzahl
+access_text() { case "$1" in netz) echo "nur das Netz" ;; internet) echo "nur Internet" ;; *) echo "Netz + Internet" ;; esac; }
+peer_seen() { # gerät -> „zuletzt vor …“ oder „gesperrt“
+    local hs
+    [ "$(pget $1 enabled)" = 0 ] && { echo "gesperrt"; return; }
+    hs=$(wg show "$(tget "$(pget $1 tunnel)" ifname)" latest-handshakes 2>/dev/null | awk -v k="$(pget $1 public_key)" '$1==k{print $2}')
+    echo "zuletzt $(ago ${hs:-0})"
+}
+conn_text() { babel_connected "$1" && echo "verbunden" || echo "nicht verbunden"; }
+
+tui_name() { # titel frage hinweis prüf-funktion -> TUI_VAL; prüf-funktion gibt bei Fehler den Grund aus
+    local hint="$3" err
+    while :; do
+        tui_input "$1" "$2" "${TUI_DEFAULT:-}" "$hint" || { TUI_DEFAULT=""; return 1; }
+        TUI_DEFAULT=""
+        err=$($4 "$TUI_VAL")
+        [ -z "$err" ] && return 0
+        hint="$err"
+    done
+}
+chk_tunnel()  { [ -n "$1" ] || { echo "Bitte einen Namen eingeben."; return; }
+                valid_tunnel_name "$1" || { echo "„$1“ geht nicht: nur a–z und 0–9, höchstens 12 Zeichen."; return; }
+                uci -q get $CFG.t_$1 >/dev/null || uci -q get network.wg_$1 >/dev/null && echo "Einen Tunnel „$1“ gibt es schon."; }
+chk_peer()    { [ -n "$1" ] || { echo "Bitte einen Namen eingeben."; return; }
+                valid_peer_name "$1" || { echo "„$1“ geht nicht: nur A–Z, a–z, 0–9 und _, höchstens 30 Zeichen."; return; }
+                uci -q get $CFG.p_$1 >/dev/null && echo "Ein Gerät „$1“ gibt es schon."; }
+chk_babel()   { [ -n "$1" ] || { echo "Bitte einen Namen eingeben."; return; }
+                valid_tunnel_name "$1" || { echo "„$1“ geht nicht: nur a–z und 0–9, höchstens 12 Zeichen."; return; }
+                uci -q get $CFG.b_$1 >/dev/null || uci -q get network.bb_$1 >/dev/null && echo "Eine Babel-Verbindung „$1“ gibt es schon."; }
+chk_link()    { [ -n "$1" ] || { echo "Bitte einen Namen eingeben."; return; }
+                valid_tunnel_name "$1" || { echo "„$1“ geht nicht: nur a–z und 0–9, höchstens 12 Zeichen."; return; }
+                uci -q get $CFG.n_$1 >/dev/null || uci -q get network.nv_$1 >/dev/null && echo "Eine Netzverbindung „$1“ gibt es schon."; }
+
+tui_main() {
+    local s=1 head
+    TUI_HOST=$(uci -q get fff.system.hostname || hostname)
+    trap 'tui_stop' EXIT
+    trap 'exit 130' INT TERM HUP
+    while :; do
+        head="$(tunnels | grep -c .) Gerätetunnel mit $(anzahl $(peers | grep -c .) Gerät Geräten) · $(anzahl $(babels | grep -c .) Babel-Verbindung Babel-Verbindungen) · $(anzahl $(netlinks | grep -c .) Netzverbindung Netzverbindungen)"
+        [ -n "$(babels)" ] && [ -d /etc/bird/fff ] && ! pidof bird >/dev/null && head="$head
+${T_RED}Achtung: bird läuft nicht – Werkzeuge → Wächter jetzt laufen lassen.${T_OFF}"
+        TUI_START=$s
+        tui_menu "Hauptmenü" "$head" \
+            "Übersicht|Alle Tunnel, Geräte und Verbindungen mit Status" \
+            "Gerätetunnel|Handy und Laptop: Tunnel anlegen, Geräte hinzufügen, QR-Code, Einstellungen ändern" \
+            "Babel-Verbindungen|Zwei Freifunk-Router über WireGuard koppeln, z. B. einen Router hinter LTE" \
+            "Netzverbindungen|Ein Netz hinter einem anderen Router erreichen, z. B. dessen Drucker" \
+            "Werkzeuge|Netze anzeigen, MTU messen, reparieren, Protokoll, Befehle für die Kommandozeile" \
+            "Beenden|" || tui_quit
+        s=$TUI_SEL
+        case $s in
+            1) tui_run "Übersicht" cmd_list ;;
+            2) tui_tunnels ;;
+            3) tui_babels ;;
+            4) tui_links ;;
+            5) tui_tools ;;
+            6) tui_quit ;;
+        esac
+    done
+}
+
+# --- Gerätetunnel -------------------------------------------------------------
+
+tui_tunnels() {
+    local s=1 t n
+    while :; do
+        set --
+        for t in $(tunnels); do
+            set -- "$@" "$t   ($(anzahl $(peers $t | grep -c .) Gerät Geräte) · $(access_text $(tget $t access)))|Netz: $(tget $t network | sed 's/^$/–/') · Port $(tget $t port) · MTU $(tget $t mtu) – Enter: Geräte und Einstellungen"
+        done
+        set -- "$@" "+ Neuen Tunnel anlegen|Schritt für Schritt: Name, Zugriff, Netz, Router-Verwaltung, MTU"
+        TUI_START=$s
+        tui_menu "Gerätetunnel" "Ein Tunnel ist ein Zugang mit eigenen Regeln, z. B. „home“ für die Familie und „gast“ für Besuch.
+Jedes Handy und jeder Laptop ist ein Gerät in genau einem Tunnel." "$@" || return 0
+        s=$TUI_SEL; n=$(tunnels | grep -c .)
+        if [ $s -gt $n ]; then tui_tunnel_new; else tui_tunnel "$(tunnels | sed -n "${s}p")"; fi
+    done
+}
+
+tui_tunnel() { # tunnel
+    local t=$1 s=1
+    while :; do
+        uci -q get $CFG.t_$t >/dev/null || return 0
+        TUI_START=$s
+        tui_menu "Tunnel $t" "$(tget $t ifname) $(ip link show "$(tget $t ifname)" >/dev/null 2>&1 && echo "${T_GREEN}aktiv${T_OFF}" || echo "${T_RED}aus${T_OFF}") · Port $(tget $t port) · $(vpn4_net $t) $(vpn6_net $t)" \
+            "Geräte ($(peers $t | grep -c .))|Geräte ansehen: QR-Code, Konfiguration, sperren, löschen" \
+            "+ Gerät hinzufügen|Neues Handy oder neuen Laptop anlegen" \
+            "Netz: $(tget $t network | sed 's/^$/–/')|In welche Netze des Routers der Tunnel führt (Client-Netz, WAN)" \
+            "Zugriff: $(access_text $(tget $t access))|Was die Geräte erreichen dürfen" \
+            "Router-Verwaltung: $(onoff $(tget $t admin))|SSH und Weboberfläche des Routers aus dem Tunnel – Enter schaltet um" \
+            "Freifunk-Netze: $(onoff $(tget $t freifunk))|10.50/16, 10.83/16 und fd43:… erreichbar, z. B. der Freifunk-DNS – Enter schaltet um" \
+            "DNS: $(tget $t dns)|Namensauflösung, die die Geräte bekommen" \
+            "MTU: $(tget $t mtu)|Paketgröße im Tunnel (1280–1420) – kann hier gemessen werden" \
+            "Tunnel löschen|Löscht den Tunnel mit allen Geräten (Schlüssel ins Archiv)" || return 0
+        s=$TUI_SEL
+        case $s in
+            1) tui_peers "$t" ;;
+            2) tui_peer_new "$t" ;;
+            3) tui_nets_pick "Netz für Tunnel $t" "$(tget $t network)" \
+                   && tui_run "Netz ändern" tui_hint "$NEU_EINLESEN" cmd_tunnel_edit "$t" --netz "$TUI_VAL" ;;
+            4) tui_access_pick "Zugriff für Tunnel $t" "$(tget $t access)" \
+                   && tui_run "Zugriff ändern" tui_hint "$NEU_EINLESEN" cmd_tunnel_edit "$t" --zugriff "$TUI_VAL" ;;
+            5) tui_run "Router-Verwaltung $( [ "$(tget $t admin)" = 1 ] && echo ausschalten || echo einschalten)" \
+                   cmd_tunnel_edit "$t" --admin "$( [ "$(tget $t admin)" = 1 ] && echo 0 || echo 1)" ;;
+            6) tui_run "Freifunk-Netze $( [ "$(tget $t freifunk)" = 1 ] && echo sperren || echo erlauben)" \
+                   cmd_tunnel_edit "$t" --freifunk "$( [ "$(tget $t freifunk)" = 1 ] && echo 0 || echo 1)" ;;
+            7) tui_input "DNS für Tunnel $t" "DNS-Server für die Geräte (mehrere mit Komma):" "$(tget $t dns)" "Meist der Router im Tunnel: $(tget $t ip4 | cut -d/ -f1)" \
+                   && tui_run "DNS ändern" tui_hint "$NEU_EINLESEN" cmd_tunnel_edit "$t" --dns "$TUI_VAL" ;;
+            8) tui_mtu_pick "MTU für Tunnel $t" "$(tget $t mtu)" && tui_run "MTU ändern" cmd_tunnel_edit "$t" --mtu "$TUI_VAL" ;;
+            9) tui_danger "Tunnel $t löschen" "Tunnel $t mit allen $(peers $t | grep -c .) Geräten löschen?
+Die Geräte kommen danach nicht mehr herein; ihre Schlüssel landen im Archiv." "Ja, Tunnel löschen" \
+                   && { tui_run "Tunnel $t löschen" cmd_tunnel_del "$t"; return 0; } ;;
+        esac
+    done
+}
+
+tui_nets_pick() { # titel vorauswahl -> TUI_VAL (Netznamen)
+    local title="$1" pre="$2" list
+    list=$(nets_detect)
+    [ -n "$list" ] || { tui_msg "$title" "Dieser Router hat gerade kein Client-Netz und kein WAN mit Adressen."; return 1; }
+    # Einträge „name|Anzeige“ – set -- überschreibt die eigenen Argumente, darum oben gesichert
+    eval "set -- $(echo "$list" | awk -F'|' '{ d = ($1 == "wan") ? "WAN, z. B. das Fritzbox-Netz" : "Client-Netz"; printf "\"%s|%-12s %-30s %s %s\" ", $1, $1, d, $3, $4 }')"
+    tui_check "$title" "Welche Netze sollen die Geräte erreichen? Nur Client-Netze und das WAN stehen zur Wahl." "$pre" "$@"
+}
+
+tui_access_pick() { # titel aktueller-wert -> TUI_VAL
+    case "$2" in netz) TUI_START=2 ;; internet) TUI_START=3 ;; *) TUI_START=1 ;; esac
+    tui_menu "$1" "Was dürfen die Geräte in diesem Tunnel?" \
+        "Netz + Internet|Gerät erreicht das gewählte Netz, sein Internet läuft über den Router – fürs eigene Handy" \
+        "Nur das Netz|Nur das gewählte Netz; Internet läuft am Gerät wie gewohnt – z. B. für Fernwartung" \
+        "Nur Internet|Keine Geräte im Haus erreichbar – für Gäste" || return 1
+    case $TUI_SEL in 1) TUI_VAL=beides ;; 2) TUI_VAL=netz ;; 3) TUI_VAL=internet ;; esac
+}
+
+tui_mtu_pick() { # titel aktueller-wert -> TUI_VAL
+    local m s head
+    tui_header "$1"
+    printf '\nMesse die Strecke des Routers ins Internet …\n'
+    m=$(path_mtu)
+    if [ -n "$m" ]; then s=$(mtu_of_path $m); head="Strecke ins Internet: $m Byte → passende Tunnel-MTU: $s (Strecke minus $WG_OVERHEAD)."
+    else s=$MTU_DEFAULT; head="Die Strecke ließ sich nicht messen – $MTU_DEFAULT passt immer."; fi
+    [ -n "$2" ] && head="$head
+Jetzt eingestellt: $2"
+    tui_menu "$1" "$head" "$s – empfohlen|Gemessener Wert" "$MTU_DEFAULT|Passt immer, etwas langsamer" "Eigener Wert …|$MTU_MIN bis $MTU_MAX" || return 1
+    case $TUI_SEL in
+        1) TUI_VAL=$s ;;
+        2) TUI_VAL=$MTU_DEFAULT ;;
+        3) while :; do
+               tui_input "$1" "MTU ($MTU_MIN–$MTU_MAX):" "$s" "Faustregel: Strecke ins Internet minus $WG_OVERHEAD" || return 1
+               valid_mtu "$TUI_VAL" && break
+               tui_msg "$1" "„$TUI_VAL“ geht nicht – erlaubt sind $MTU_MIN bis $MTU_MAX."
+           done ;;
+    esac
+}
+
+tui_tunnel_new() {
+    local name acc netz="" admin=0 mtu
+    tui_name "Neuer Tunnel – Schritt 1 von 5" "Name des Tunnels:" "z. B. home für die Familie oder gast für Besuch · nur a–z und 0–9, höchstens 12 Zeichen" chk_tunnel || return 0
+    name=$TUI_VAL
+    tui_access_pick "Neuer Tunnel – Schritt 2 von 5" beides || return 0
+    acc=$TUI_VAL
+    if [ "$acc" != internet ]; then
+        while :; do
+            tui_nets_pick "Neuer Tunnel – Schritt 3 von 5" "$(nets_detect | head -1 | cut -d'|' -f1)" || return 0
+            netz=$TUI_VAL
+            [ -n "$netz" ] && break
+            tui_msg "Netz fehlt" "Für diesen Zugriff muss mindestens ein Netz ein Häkchen haben (Leertaste)."
+        done
+    fi
+    TUI_START=2
+    tui_menu "Neuer Tunnel – Schritt 4 von 5" "Dürfen die Geräte die Verwaltung des Routers erreichen (SSH, Weboberfläche)?" \
+        "Ja|Nur sinnvoll, wenn ausschließlich eigene Geräte im Tunnel sind" \
+        "Nein – empfohlen|Geräte erreichen den Router nur als DNS und Weg ins Netz" || return 0
+    [ "$TUI_SEL" = 1 ] && admin=1
+    tui_mtu_pick "Neuer Tunnel – Schritt 5 von 5" "" || return 0
+    mtu=$TUI_VAL
+    tui_confirm "Neuer Tunnel – Zusammenfassung" "Name:              $name
+Zugriff:           $(access_text $acc)
+Netz:              ${netz:-–}
+Router-Verwaltung: $(onoff $admin)
+MTU:               $mtu" "Tunnel anlegen" || return 0
+    tui_run "Tunnel $name anlegen" cmd_tunnel_add "$name" --netz "$netz" --zugriff "$acc" --admin "$admin" --mtu "$mtu" || return 0
+    tui_confirm "Tunnel $name" "Der Tunnel ist angelegt. Jetzt das erste Gerät hinzufügen?" "Gerät hinzufügen" && tui_peer_new "$name"
+}
+
+tui_peers() { # tunnel
+    local t=$1 s=1 p n
+    while :; do
+        set --
+        for p in $(peers $t); do
+            set -- "$@" "$(printf '%-20s %-14s %s' "$p" "$(pget $p ip4)" "$(peer_seen $p)")|Enter: QR-Code, Konfiguration, sperren, löschen"
+        done
+        set -- "$@" "+ Gerät hinzufügen|Neues Handy oder neuen Laptop anlegen"
+        TUI_START=$s
+        tui_menu "Geräte im Tunnel $t" "" "$@" || return 0
+        s=$TUI_SEL; n=$(peers $t | grep -c .)
+        if [ $s -gt $n ]; then tui_peer_new "$t"; else tui_peer "$(peers $t | sed -n "${s}p")"; fi
+    done
+}
+
+tui_show_conf() { # gerät: Konfiguration plus Hinweis, wie man sie als Datei holt
+    cmd_show "$1"
+    say ""
+    say "Als Datei vom eigenen Rechner holen und in der WireGuard-App importieren:"
+    say "  ssh root@$(endpoint_addr) wg_manager zeige $1 --raw > $1.conf"
+}
+
+tui_peer() { # gerät
+    local p=$1 s=1
+    while :; do
+        uci -q get $CFG.p_$p >/dev/null || return 0
+        TUI_START=$s
+        tui_menu "Gerät $p" "Tunnel $(pget $p tunnel) · $(pget $p ip4) · $(peer_seen $p)" \
+            "QR-Code anzeigen|Handy/Tablet: WireGuard-App → „+“ → „QR-Code scannen“ (Fenster groß genug ziehen)" \
+            "Konfiguration als Text|Laptop/PC: als Datei speichern und in der WireGuard-App importieren" \
+            "$( [ "$(pget $p enabled)" = 0 ] && echo "Entsperren|Das Gerät darf wieder verbinden" || echo "Sperren|Das Gerät kommt nicht mehr herein, die Schlüssel bleiben erhalten")" \
+            "Gerät löschen|Schlüssel landen im Archiv" || return 0
+        s=$TUI_SEL
+        case $s in
+            1) tui_run "QR-Code für $p" cmd_qr "$p" ;;
+            2) tui_run "Konfiguration für $p" tui_show_conf "$p" ;;
+            3) tui_run "Gerät $p $( [ "$(pget $p enabled)" = 0 ] && echo entsperren || echo sperren)" \
+                   cmd_peer_enable "$p" "$( [ "$(pget $p enabled)" = 0 ] && echo 1 || echo 0)" ;;
+            4) tui_danger "Gerät $p löschen" "Gerät $p löschen? Es kommt danach nicht mehr herein; die Schlüssel landen im Archiv." "Ja, Gerät löschen" \
+                   && { tui_run "Gerät $p löschen" cmd_peer_del "$p"; return 0; } ;;
+        esac
+    done
+}
+
+tui_peer_new() { # tunnel
+    local t=$1 name
+    tui_name "Neues Gerät im Tunnel $t" "Name des Geräts:" "z. B. Handy_Anna oder Laptop_Ben · A–Z, a–z, 0–9 und _" chk_peer || return 0
+    name=$TUI_VAL
+    tui_run "Gerät $name anlegen" cmd_peer_add "$t" "$name" || return 0
+    TUI_START=1
+    tui_menu "Gerät $name einrichten" "Das Gerät ist angelegt. Wie soll es seine Konfiguration bekommen?" \
+        "QR-Code anzeigen|Handy/Tablet: WireGuard-App → „+“ → „QR-Code scannen“" \
+        "Konfiguration als Text|Laptop/PC" \
+        "Später|Geht jederzeit über Gerätetunnel → Tunnel → Geräte" || return 0
+    case $TUI_SEL in
+        1) tui_run "QR-Code für $name" cmd_qr "$name" ;;
+        2) tui_run "Konfiguration für $name" tui_show_conf "$name" ;;
+    esac
+}
+
+# --- Babel-Verbindungen ---------------------------------------------------------
+
+tui_rxcost() { # vorschlag -> TUI_VAL
+    local hint="16384 = nur Ersatzweg (Standard) · kleiner, z. B. 1024 = Tunnel wird bevorzugt · zweiter Router A z. B. 20000 · auf beiden Routern gleich"
+    while :; do
+        tui_input "rxcost" "Babel-Kosten dieses Tunnels (1–65535):" "$1" "$hint" || return 1
+        valid_rxcost "$TUI_VAL" && return 0
+        hint="„$TUI_VAL“ geht nicht – erlaubt sind ganze Zahlen von 1 bis 65535."
+    done
+}
+
+tui_babels() {
+    local s=1 b n
+    while :; do
+        set --
+        for b in $(babels); do
+            set -- "$@" "$b   (Seite $(bget $b role | tr ab AB) · $(conn_text "$(bget $b ifname)") · rxcost $(bget $b rxcost))|$( [ "$(bget $b role)" = a ] && echo "Dieser Router lauscht auf Port $(bget $b port)" || echo "Verbunden mit $(bget $b von)") – Enter: Zeile, MTU, rxcost, löschen"
+        done
+        set -- "$@" "+ Neue Verbindung – dieser Router lauscht (Seite A)|Erzeugt eine Zeile, die auf dem anderen Router eingefügt wird" \
+                    "+ Zeile vom anderen Router einfügen (Seite B)|Dieser Router verbindet sich mit Router A"
+        TUI_START=$s
+        tui_menu "Babel-Verbindungen" "Koppeln zwei Freifunk-Router über WireGuard, z. B. einen Router hinter LTE ohne eigenen Gateway-Server.
+Router A legt an und zeigt eine Zeile, Router B fügt sie ein – die MTU handeln beide selbst aus." "$@" || return 0
+        s=$TUI_SEL; n=$(babels | grep -c .)
+        if [ $s -le $n ]; then tui_babel "$(babels | sed -n "${s}p")"
+        elif [ $s = $((n + 1)) ]; then tui_babel_new
+        else tui_babel_insert; fi
+    done
+}
+
+tui_babel() { # name
+    local b=$1 s=1 a ifn head
+    while :; do
+        uci -q get $CFG.b_$b >/dev/null || return 0
+        ifn=$(bget $b ifname)
+        if [ "$(bget $b role)" = a ]; then head="Seite A · lauscht auf Port $(bget $b port)"
+        else head="Seite B · verbunden mit $(bget $b von) [$(bget $b endpoint_host)]:$(bget $b endpoint_port)"; fi
+        if babel_connected "$ifn"; then
+            head="$head
+${T_GREEN}verbunden${T_OFF} · Gegenstelle antwortet: $(babel_reach "$ifn" "$(babel_peer_ll $b)" && echo ja || echo nein) · Babel-Routen: $(babel_routes "$ifn") · MTU $(bget $b mtu) · rxcost $(bget $b rxcost)"
+        else
+            a=$(babel_hs "$ifn")
+            head="$head
+${T_RED}nicht verbunden${T_OFF} (zuletzt $(ago ${a:-0})) · MTU $(bget $b mtu) · rxcost $(bget $b rxcost)"
+        fi
+        set --
+        [ "$(bget $b role)" = a ] && set -- "Zeile für Router B anzeigen|Zum Kopieren – enthält den privaten Schlüssel von Router B, nur dorthin geben"
+        set -- "$@" "MTU jetzt neu aushandeln|Sucht die größte Paketgröße, die durch den Tunnel passt" \
+                    "rxcost ändern (jetzt $(bget $b rxcost))|Babel-Kosten: 16384 = Ersatzweg, kleiner = bevorzugt; auf beiden Routern gleich" \
+                    "Verbindung löschen|Auch auf dem anderen Router löschen"
+        TUI_START=$s
+        tui_menu "Babel-Verbindung $b" "$head" "$@" || return 0
+        s=$TUI_SEL; a=$s
+        [ "$(bget $b role)" = a ] || a=$((s + 1))
+        case $a in
+            1) tui_run "Zeile für Router B" cmd_babel_show "$b" ;;
+            2) tui_run "MTU aushandeln: $b" cmd_babel_mtu "$b" ;;
+            3) tui_rxcost "$(bget $b rxcost)" && tui_run "rxcost ändern: $b" cmd_babel_edit "$b" --rxcost "$TUI_VAL" ;;
+            4) tui_danger "Babel-Verbindung $b löschen" "Verbindung $b löschen? Auf dem anderen Router ($( [ "$(bget $b role)" = a ] && echo "Seite B" || bget $b von)) ebenfalls löschen." "Ja, löschen" \
+                   && { tui_run "Babel-Verbindung $b löschen" cmd_babel_del "$b"; return 0; } ;;
+        esac
+    done
+}
+
+tui_babel_new() {
+    local name
+    tui_name "Neue Babel-Verbindung (Seite A)" "Name der Verbindung:" "z. B. lte1 · nur a–z und 0–9, höchstens 12 Zeichen" chk_babel || return 0
+    name=$TUI_VAL
+    tui_rxcost "$BABEL_RXCOST" || return 0
+    tui_run "Babel-Verbindung $name anlegen" cmd_babel_add "$name" --rxcost "$TUI_VAL"
+}
+
+tui_line() { # titel tag -> TUI_VAL = eingefügte Zeile (geprüft)
+    local line
+    tui_input "$1" "Zeile von Router A einfügen (beginnt mit $2):" "" "Auf Router A: $( [ "$2" = "$SNIP_TAG" ] && echo "Babel-Verbindungen" || echo "Netzverbindungen") → Verbindung → „Zeile für Router B anzeigen“" || return 1
+    line=$(echo "$TUI_VAL" | tr -d '\r' | sed 's/^ *//')
+    case "$line" in
+        "$2 "*) TUI_VAL=$line; return 0 ;;
+        "$SNIP_TAG "*) tui_msg "$1" "Das ist eine Zeile für eine Babel-Verbindung – bitte unter Babel-Verbindungen einfügen." ;;
+        "$NETZ_TAG "*) tui_msg "$1" "Das ist eine Zeile für eine Netzverbindung – bitte unter Netzverbindungen einfügen." ;;
+        *) tui_msg "$1" "Das ist keine Zeile von wg_manager (sie beginnt mit $2). Beim Kopieren abgeschnitten?" ;;
+    esac
+    return 1
+}
+
+tui_babel_insert() {
+    local line name rx
+    tui_line "Zeile einfügen (Seite B)" "$SNIP_TAG" || return 0
+    line=$TUI_VAL
+    name=$(babel_name_from_host "$(snip_field "$line" von)")
+    valid_tunnel_name "$name" || name=$(snip_field "$line" name)
+    TUI_DEFAULT=$(babel_free_name "$name")
+    tui_name "Zeile einfügen (Seite B)" "Name der Verbindung auf diesem Router:" "Vorschlag nach Router A ($(snip_field "$line" von)) – mit Enter übernehmen" chk_babel || return 0
+    name=$TUI_VAL
+    rx=$(snip_field "$line" rx); valid_rxcost "$rx" || rx=$BABEL_RXCOST
+    tui_rxcost "$rx" || return 0
+    tui_run "Babel-Verbindung $name einfügen" cmd_babel_insert "$line" --name "$name" --rxcost "$TUI_VAL"
+}
+
+# --- Netzverbindungen -----------------------------------------------------------
+
+tui_links() {
+    local s=1 l n
+    while :; do
+        set --
+        for l in $(netlinks); do
+            if [ "$(lget $l role)" = a ]; then
+                set -- "$@" "$l   (Seite A · gibt $(lget $l netz) $(lget $l real) frei · $(conn_text "$(lget $l ifname)"))|Ersatznetz $(lget $l ersatz) – Enter: Zeile anzeigen, löschen"
+            else
+                set -- "$@" "$l   (Seite B · $(lget $l dest) bei $(lget $l von) · $(conn_text "$(lget $l ifname)"))|Erreichbar aus: $(lget $l netz)$( [ "$(lget $l dest)" != "$(lget $l real)" ] && echo " · dort $(lget $l real), letzte Zahl gleich")"
+            fi
+        done
+        set -- "$@" "+ Netz dieses Routers freigeben (Seite A)|z. B. das Fritzbox-Netz am WAN mit einem Drucker – erzeugt eine Zeile für Router B" \
+                    "+ Zeile vom anderen Router einfügen (Seite B)|Prüft auf gleiche Netze und nimmt bei Bedarf das Ersatznetz"
+        TUI_START=$s
+        tui_menu "Netzverbindungen" "Machen ein Netz hinter einem anderen Router erreichbar – nur in eine Richtung, nur IPv4.
+Router A gibt frei und zeigt eine Zeile, Router B fügt sie ein." "$@" || return 0
+        s=$TUI_SEL; n=$(netlinks | grep -c .)
+        if [ $s -le $n ]; then tui_link "$(netlinks | sed -n "${s}p")"
+        elif [ $s = $((n + 1)) ]; then tui_link_new
+        else tui_link_insert; fi
+    done
+}
+
+tui_link() { # name
+    local l=$1 s=1 a head
+    while :; do
+        uci -q get $CFG.n_$l >/dev/null || return 0
+        if [ "$(lget $l role)" = a ]; then
+            head="Seite A · gibt $(lget $l netz) $(lget $l real) frei · Ersatznetz $(lget $l ersatz) · Port $(lget $l port)"
+        else
+            head="Seite B · $(lget $l von): $(lget $l real)$( [ "$(lget $l dest)" != "$(lget $l real)" ] && echo " – hier als $(lget $l dest)") · aus $(lget $l netz)"
+        fi
+        head="$head
+$(babel_connected "$(lget $l ifname)" && echo "${T_GREEN}verbunden${T_OFF}" || echo "${T_RED}nicht verbunden${T_OFF}")"
+        set --
+        [ "$(lget $l role)" = a ] && set -- "Zeile für Router B anzeigen|Zum Kopieren – enthält den privaten Schlüssel von Router B"
+        set -- "$@" "Verbindung löschen|Auch auf dem anderen Router löschen"
+        TUI_START=$s
+        tui_menu "Netzverbindung $l" "$head" "$@" || return 0
+        s=$TUI_SEL; a=$s
+        [ "$(lget $l role)" = a ] || a=$((s + 1))
+        case $a in
+            1) tui_run "Zeile für Router B" cmd_link_show "$l" ;;
+            2) tui_danger "Netzverbindung $l löschen" "Verbindung $l löschen? Auf dem anderen Router ebenfalls löschen." "Ja, löschen" \
+                   && { tui_run "Netzverbindung $l löschen" cmd_link_del "$l"; return 0; } ;;
+        esac
+    done
+}
+
+tui_link_new() {
+    local name netz
+    tui_name "Netz freigeben (Seite A)" "Name der Verbindung:" "z. B. drucker · nur a–z und 0–9, höchstens 12 Zeichen" chk_link || return 0
+    name=$TUI_VAL
+    eval "set -- $(nets_detect | awk -F'|' '$3 != "" { d = ($1 == "wan") ? "WAN, z. B. das Fritzbox-Netz" : "Client-Netz"; printf "\"%-12s %-30s %s|%s\" ", $1, d, $3, $1 }')"
+    [ $# -gt 0 ] || { tui_msg "Netz freigeben" "Dieser Router hat kein Netz mit IPv4-Adressen, das sich freigeben ließe."; return 0; }
+    tui_menu "Netz freigeben (Seite A)" "Welches Netz dieses Routers soll der andere Router erreichen?" "$@" || return 0
+    eval "netz=\${$TUI_SEL}"
+    netz=${netz#*|}
+    tui_run "Netz $netz freigeben" cmd_link_add "$name" --netz "$netz"
+}
+
+tui_link_insert() {
+    local line real ersatz von coll name nets
+    tui_line "Zeile einfügen (Seite B)" "$NETZ_TAG" || return 0
+    line=$TUI_VAL
+    real=$(snip_field "$line" netz); ersatz=$(snip_field "$line" ersatz); von=$(snip_field "$line" von)
+    valid_net4 "$real" && valid_net4 "$ersatz" || { tui_msg "Zeile einfügen" "Die Netzangaben in der Zeile sind unvollständig – beim Kopieren abgeschnitten?"; return 0; }
+    coll=$(own_nets4 | ip4_overlaps "$real" | head -1)
+    if [ -n "$coll" ]; then
+        tui_confirm "Gleiches Netz" "Das Netz $real von $von gibt es auf diesem Router auch ($coll).
+Deshalb gilt das Ersatznetz $ersatz – die letzte Zahl bleibt gleich:
+  ${ersatz%.*}.25 hier = ${real%.*}.25 bei $von" "Ersatznetz verwenden" || return 0
+    fi
+    tui_nets_pick "Zeile einfügen (Seite B)" "$(nets_detect | cut -d'|' -f1 | grep -vx wan | tr '\n' ' ')" || return 0
+    nets=$TUI_VAL
+    [ -n "$nets" ] || { tui_msg "Zeile einfügen" "Mindestens ein Netz braucht ein Häkchen – aus ihm erreicht man dann das Netz von $von."; return 0; }
+    name=$(babel_name_from_host "$von")
+    valid_tunnel_name "$name" || name=$(snip_field "$line" name)
+    TUI_DEFAULT=$(link_free_name "$name")
+    tui_name "Zeile einfügen (Seite B)" "Name der Verbindung auf diesem Router:" "Vorschlag nach Router A ($von) – mit Enter übernehmen" chk_link || return 0
+    name=$TUI_VAL
+    tui_run "Netzverbindung $name einfügen" tui_nostdin cmd_link_insert "$line" --name "$name" --netz "$nets"
+}
+
+# --- Werkzeuge ------------------------------------------------------------------
+
+tui_log() { logread 2>/dev/null | grep wg_manager | tail -25; say "(ältere Meldungen: logread | grep wg_manager)"; }
+
+tui_tools() {
+    local s=1
+    while :; do
+        TUI_START=$s
+        tui_menu "Werkzeuge" "" \
+            "Netze des Routers anzeigen|Client-Netze und WAN – dorthin können Gerätetunnel führen" \
+            "MTU messen|Strecke ins Internet messen und alle Tunnel prüfen" \
+            "Alles neu anwenden (reparieren)|Schreibt Netz, Firewall und bird aus /etc/config/wgmanager neu" \
+            "Wächter jetzt laufen lassen|Stellt Fehlendes wieder her, startet bird, handelt die MTU aus (läuft sonst alle 5 Minuten)" \
+            "Protokoll anzeigen|Die letzten Meldungen von wg_manager" \
+            "Befehle für die Kommandozeile|Alles aus diesem Menü gibt es auch als Befehl" || return 0
+        s=$TUI_SEL
+        case $s in
+            1) tui_run "Netze des Routers" cmd_nets ;;
+            2) tui_run "MTU messen" cmd_mtu_check ;;
+            3) tui_run "Alles neu anwenden" cmd_apply ;;
+            4) tui_run "Wächter" cmd_babel_check ;;
+            5) tui_run "Protokoll" tui_log ;;
+            6) tui_run "Befehle für die Kommandozeile" usage ;;
+        esac
+    done
+}
+
 usage() {
     cat <<EOF
-wg_manager – WireGuard-Zugänge verwalten (ohne Argumente: Menü)
+wg_manager – WireGuard-Zugänge verwalten
+  Ohne Argumente: Menü – mit Pfeiltasten wählen, Enter öffnet, Esc geht zurück, q beendet.
+  wg_manager menue-einfach: das frühere Zahlenmenü. Alles aus dem Menü gibt es auch als Befehl:
 
   liste                              Tunnel und Geräte mit Status
   netze                              Netze des Routers, in die man einhängen kann
@@ -2164,7 +2798,9 @@ EOF
 
 LOCK=/var/lock/wg_manager.lock
 case "$1" in
-    ""|menu|menue) ensure_env; menu ;;
+    # Menü mit Pfeiltasten nur an einem echten Terminal, sonst (z. B. per Pipe) das Zahlenmenü
+    ""|menu|menue) ensure_env; if [ -t 0 ] && [ -t 1 ]; then tui_main; else menu_classic; fi ;;
+    menue-einfach|menu-classic) ensure_env; menu_classic ;;
     hilfe|help|-h|--help) usage ;;
     liste|list|status) ensure_env; cmd_list ;;
     netze|nets) cmd_nets ;;

@@ -16,7 +16,7 @@ und Firmware-Updates übersteht. Es kann drei Dinge:
 
 ## Inhalt
 
-1. [Installation](#installation)
+1. [Installation](#installation) · [Das Menü](#das-menü)
 2. [Gerätetunnel für Handy und Laptop](#gerätetunnel-für-handy-und-laptop)
 3. [Babel-Verbindungen zwischen Routern](#babel-verbindungen-zwischen-routern)
 4. [Netzverbindungen zwischen Netzen](#netzverbindungen-zwischen-netzen)
@@ -37,8 +37,8 @@ ssh root@<router> sh < wg_install.txt
 Danach auf dem Router:
 
 ```sh
-wg_manager          # Menü
-wg_manager hilfe    # alle Befehle
+wg_manager          # Menü (Pfeiltasten, Enter, Esc)
+wg_manager hilfe    # alle Befehle für die Kommandozeile
 ```
 
 - **Aktualisieren** geht genauso; Einstellungen und Schlüssel bleiben erhalten.
@@ -46,6 +46,34 @@ wg_manager hilfe    # alle Befehle
   (`/etc/rc.local.fff_userconfig`) ein – nach einem Firmware-Update stellt es sich von selbst wieder her.
 - **Umstieg von der alten Version** (wg_manager v1 / privwg): `wg_manager migrate` übernimmt Tunnel, Geräte und
   Schlüssel; an den Geräten muss nichts geändert werden.
+
+## Das Menü
+
+`wg_manager` ohne Angabe öffnet ein Menü, das ganz ohne Befehle auskommt:
+
+| Taste | macht |
+|---|---|
+| ↑ ↓ | Eintrag wählen – unter der Liste steht, was er bewirkt |
+| Enter | öffnen bzw. ausführen |
+| Esc | eine Ebene zurück (im Hauptmenü: beenden) |
+| Leertaste | Häkchen setzen/entfernen (Auswahl der Netze) |
+| 1–9 | Eintrag direkt wählen |
+| q | beenden |
+
+Aufgebaut ist es nach dem, was man verwaltet:
+
+- **Gerätetunnel** → Tunnel → Geräte → Gerät: QR-Code, Konfiguration als Text, sperren/entsperren, löschen.
+  Im Tunnel selbst stehen alle Einstellungen mit ihrem aktuellen Wert (Netz, Zugriff, Router-Verwaltung,
+  Freifunk-Netze, DNS, MTU) – Enter ändert sie. „+ Neuen Tunnel anlegen“ und „+ Gerät hinzufügen“ führen Schritt
+  für Schritt durch alles Nötige; die MTU wird dabei gemessen.
+- **Babel-Verbindungen** und **Netzverbindungen**: anlegen (Seite A, die Zeile erscheint zum Kopieren), Zeile
+  einfügen (Seite B, Einfügen mit Strg+Umschalt+V oder Rechtsklick), ansehen, ändern, löschen. Beim Einfügen einer
+  Netzverbindung erklärt das Menü ein nötiges Ersatznetz und fragt nach.
+- **Werkzeuge**: Netze anzeigen, MTU messen, alles neu anwenden, Wächter, Protokoll, Befehlsübersicht.
+
+Löschen fragt immer nach; vorausgewählt ist „Abbrechen“. Das Menü braucht nichts außer der busybox-Shell der
+Firmware. Ohne Terminal (z. B. per Pipe) und mit `wg_manager menue-einfach` gibt es das frühere Zahlenmenü. Alles,
+was das Menü kann, gibt es weiterhin als Befehl – die folgenden Abschnitte nennen beides.
 
 ## Gerätetunnel für Handy und Laptop
 
@@ -64,7 +92,7 @@ In der WireGuard-App: „+“ → „QR-Code scannen“. Für einen Laptop die K
 ssh root@<router> wg_manager zeige Laptop_Anna --raw > laptop.conf
 ```
 
-Im Menü: Punkt 5 (Tunnel anlegen), Punkt 1 (Gerät hinzufügen, danach „Als QR-Code anzeigen?“).
+Im Menü: Gerätetunnel → „+ Neuen Tunnel anlegen“, danach „+ Gerät hinzufügen“ und „QR-Code anzeigen“.
 
 ### Tunnel und Geräte
 
@@ -132,7 +160,7 @@ Gateway-Server. Babel behandelt den Tunnel wie jede andere Verbindung und tausch
 
 ### Schnellstart
 
-**Router A** – Menü `b` → `1`, oder:
+**Router A** – Menü: Babel-Verbindungen → „+ Neue Verbindung – dieser Router lauscht“, oder:
 
 ```sh
 wg_manager babel-neu lte1
@@ -140,7 +168,7 @@ wg_manager babel-neu lte1
 
 Ausgegeben wird **eine Zeile** zum Kopieren.
 
-**Router B** – Menü `b` → `2`, oder:
+**Router B** – Menü: Babel-Verbindungen → „+ Zeile vom anderen Router einfügen“, oder:
 
 ```sh
 wg_manager babel-einfuegen          # fragt nach der Zeile
@@ -188,7 +216,7 @@ rxcost sind die Babel-Kosten des Tunnels (1–65535), auf beiden Routern gleich 
 - **Kleiner** (z. B. 1024) – Babel bevorzugt den Tunnel.
 - Babel addiert die Kosten entlang eines Weges und hält ein Ziel ab 65535 für unerreichbar – hintereinander
   geschaltete Tunnel brauchen kleinere Werte.
-- Ändern auf beiden Seiten: `wg_manager babel-aendern <name> --rxcost N` (Menü `b` → `6`). Der Tunnel bleibt stehen,
+- Ändern auf beiden Seiten: `wg_manager babel-aendern <name> --rxcost N` (Menü: Babel-Verbindungen → Verbindung → „rxcost ändern“). Der Tunnel bleibt stehen,
   nur bird wird neu geladen.
 
 ### Mehrere Router A
@@ -223,13 +251,13 @@ Adressübersetzung.
 
 ### Schnellstart
 
-**Router A** – Menü `n` → `1`, oder:
+**Router A** – Menü: Netzverbindungen → „+ Netz dieses Routers freigeben“, oder:
 
 ```sh
 wg_manager netz-neu drucker --netz wan      # WAN freigeben (ohne --netz: WAN)
 ```
 
-**Router B** – Menü `n` → `2`, oder:
+**Router B** – Menü: Netzverbindungen → „+ Zeile vom anderen Router einfügen“, oder:
 
 ```sh
 wg_manager netz-einfuegen                   # fragt nach der Zeile
@@ -431,6 +459,9 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
+- **2.5** (27.10.2026) – Menü mit Pfeiltasten, Enter und Esc für alle Funktionen: Assistenten zum Anlegen,
+  Einstellungen mit aktuellem Wert, Netzauswahl per Häkchen, Sicherheitsabfrage beim Löschen; ohne Zusatzprogramme.
+  Das Zahlenmenü bleibt als `menue-einfach`, alle Befehle bleiben unverändert.
 - **2.4** (27.10.2026) – Netzverbindungen zwischen Netzen (`netz-neu`, `netz-einfuegen`, Überschneidungsprüfung gegen
   alle Netze des Routers, Ersatznetz mit 1:1-Abbildung, nur in eine Richtung); Gerätetunnel nur noch in Client-Netze
   und das WAN (neu wählbar), Babel-/Mesh-/Tunnelschnittstellen werden abgelehnt.
