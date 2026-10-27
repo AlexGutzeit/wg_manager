@@ -12,7 +12,8 @@ und Firmware-Updates übersteht. Es kann drei Dinge:
   Regel), gilt automatisch ein Ersatznetz.
 
 **Anleitung mit Bildschirmfotos zu jedem Schritt:** [docs/wg_manager-anleitung.pdf](docs/wg_manager-anleitung.pdf)
-(36 Seiten – Installation, Gerätetunnel samt aller Änderungsmöglichkeiten, Babel- und Netzverbindungen, Betrieb).
+(46 Seiten, Schritt für Schritt im Menü – Installation, Gerätetunnel samt aller Änderungsmöglichkeiten, Babel- und
+Netzverbindungen, Werkzeuge; Befehle für die Kommandozeile im Anhang).
 
 ## Inhalt
 

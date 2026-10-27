@@ -848,7 +848,7 @@ EOF
     ok "Babel-Verbindung $name angelegt: bb_$name lauscht auf Port $port."
     cmd_apply
     say ""
-    say "Diese Zeile auf dem anderen Router einfügen (Menü: b → 2, oder: wg_manager babel-einfuegen):"
+    say "Diese Zeile auf dem anderen Router einfügen – Menü: Babel-Verbindungen → „+ Zeile vom anderen Router einfügen“ (oder: wg_manager babel-einfuegen):"
     say ""
     cmd_babel_show "$name"
     say ""
@@ -1207,7 +1207,7 @@ EOF
     say "Überschneidet sich $real mit einem Netz des anderen Routers, erreicht er es als $ersatz (letzte Zahl gleich)."
     cmd_apply
     say ""
-    say "Diese Zeile auf dem anderen Router einfügen (Menü: n → 2, oder: wg_manager netz-einfuegen):"
+    say "Diese Zeile auf dem anderen Router einfügen – Menü: Netzverbindungen → „+ Zeile vom anderen Router einfügen“ (oder: wg_manager netz-einfuegen):"
     say ""
     cmd_link_show "$name"
     say ""
@@ -2694,11 +2694,13 @@ tui_link_new() {
     local name netz
     tui_name "Netz freigeben (Seite A)" "Name der Verbindung:" "z. B. drucker · nur a–z und 0–9, höchstens 12 Zeichen" chk_link || return 0
     name=$TUI_VAL
-    eval "set -- $(nets_detect | awk -F'|' '$3 != "" { d = ($1 == "wan") ? "WAN, z. B. das Fritzbox-Netz" : "Client-Netz"; printf "\"%-12s %-30s %s|%s\" ", $1, d, $3, $1 }')"
+    eval "set -- $(nets_detect | awk -F'|' '$3 != "" {
+        if ($1 == "wan") { d = "WAN, z. B. das Fritzbox-Netz"; h = "Das Netz am Anschluss dieses Routers, z. B. hinter der Fritzbox mit dem Drucker" }
+        else { d = "Client-Netz"; h = "Das Netz, in dem die Geräte dieses Freifunk-Routers stehen" }
+        printf "\"%-12s %-30s %s|%s\" ", $1, d, $3, h }')"
     [ $# -gt 0 ] || { tui_msg "Netz freigeben" "Dieser Router hat kein Netz mit IPv4-Adressen, das sich freigeben ließe."; return 0; }
     tui_menu "Netz freigeben (Seite A)" "Welches Netz dieses Routers soll der andere Router erreichen?" "$@" || return 0
-    eval "netz=\${$TUI_SEL}"
-    netz=${netz#*|}
+    netz=$(nets_detect | awk -F'|' '$3 != "" {print $1}' | sed -n "${TUI_SEL}p")
     tui_run "Netz $netz freigeben" cmd_link_add "$name" --netz "$netz"
 }
 
