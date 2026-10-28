@@ -377,7 +377,8 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   Vielfaches von 16 auf, aber nie über die MTU) und zählt, ob der Kernel beim Absenden zerlegt hat
   (`Ip6FragCreates`) – das erkennt auch einen eigenen Uplink-Tunnel mit kleinerer MTU.
 - Der Wächter liegt bei micrond der Firmware in `/usr/lib/micron.d/wg_manager` (die Firmware liest kein
-  `/etc/crontabs`).
+  `/etc/crontabs`). Er läuft, sobald wg_manager etwas verwaltet – auch nur Gerätetunnel –, und setzt aus,
+  solange `configure-layer3` läuft.
 
 ### Netzverbindungen im Detail
 
@@ -467,6 +468,8 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
+- **2.5.2** (28.10.2026) – Wächter läuft auch auf Routern mit nur Gerätetunneln (stellt von der Firmware gelöschte
+  Tunnel wieder her, prüft die IPv6 am WAN) und setzt aus, solange `configure-layer3` läuft.
 - **2.5.1** (28.10.2026) – Wächter startet `wan6` neu, wenn die IPv6 des WAN-Anschlusses im Kernel fehlt, die
   Firmware sie aber noch führt (gesehen am LTE-Hotspot Netgear M1).
 - **2.5** (27.10.2026) – Menü mit Pfeiltasten, Enter und Esc für alle Funktionen: Assistenten zum Anlegen,
