@@ -207,6 +207,8 @@ können verschieden sein (z. B. bei LTE).
 
 Ein **Wächter** (alle 5 Minuten) handelt neu aus, wenn die Verbindung weg war oder sich die Adresse der Gegenstelle
 ändert, und prüft stündlich, ob die MTU noch durchkommt. Von Hand: `wg_manager babel-mtu <name>`.
+Hat der WAN-Anschluss seine IPv6 verloren, obwohl die Firmware sie noch für vorhanden hält, startet der Wächter
+`wan6` neu (höchstens alle 15 Minuten, Eintrag im Protokoll) – siehe Eigenheiten.
 
 ### rxcost
 
@@ -400,6 +402,11 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   file or directory“), und procd gibt auf. Ein leerer Ordner stört nicht, und bird 2.15.1 (20241219) ist nicht
   betroffen. wg_manager startet bird in diesem Fall selbst – beim Anwenden und über den Wächter.
 - Auf der Beta-Firmware fehlt `birdc`; die Babel-Nachbarn zeigt `birdcl show babel neighbors`.
+- **IPv6 am WAN geht verloren (LTE-Hotspot Netgear Nighthawk M1):** Nach der täglichen Neuanmeldung des Hotspots im
+  Mobilfunknetz verschwindet die IPv6 des WAN-Anschlusses aus dem Kernel, netifd/odhcp6c führen sie aber weiter.
+  IPv4 läuft normal, doch alle Tunnel über IPv6 stehen still – stundenlang, bis `wan6` neu startet (Kabel ziehen
+  wirkt genauso). Der Wächter erkennt genau diesen Widerspruch und führt `ifup wan6` aus; die Tunnel stehen nach
+  rund 20 Sekunden wieder, die Babel-Routen nach etwa einer Minute.
 
 ## Gut zu wissen
 
@@ -425,11 +432,11 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   nach entfernter bird-Datei, Neuaushandeln nach Adresswechsel, Erkennen einer verschwundenen Gegenstelle); rxcost
   ändern auf beiden Seiten ohne Tunnelabriss und Übernahme über die Zeile; zwei Verbindungen auf einem Router B mit
   automatisch eindeutigen Namen; Löschen ohne Reste.
-- **LTE (25.10.2026):** Router B = EdgeRouter X (layer3-20250321-beta) hinter einer LTE-Fritzbox (IPv6 vom
+- **LTE (25.10.2026):** Router B = EdgeRouter X (layer3-20250321-beta) hinter einem LTE-Hotspot Netgear M1 (IPv6 vom
   Mobilfunkanbieter), verbunden mit **zwei Routern A**. Beide Tunnel handeln 1332 aus; Geräte hinter Router B kommen
   über IPv4 (NAT) und IPv6 (eigenes /64) ins Internet, das Netz von B ist im Freifunk-Netz erreichbar. Hauptweg über
   rxcost (16384/20000); fällt er aus, übernimmt der zweite Router A nach rund 23 Sekunden, zurück ging es nach
-  4 Sekunden. Laufzeit über LTE 120–150 ms. Neue LTE-Adresse (Fritzbox „Neu verbinden“): beide Tunnel stehen nach
+  4 Sekunden. Laufzeit über LTE 120–150 ms. Neue LTE-Adresse (Hotspot neu verbunden): beide Tunnel stehen nach
   rund einer Minute wieder, die Router A übernehmen die neue Adresse, ihre Wächter handeln die MTU beim nächsten
   Lauf neu aus. Echter Neustart von Router B: Babel-Nachbarn nach 76 Sekunden.
 - **Gerätetunnel zu Router B (Tunnel im Tunnel, 25.10.2026):** Handy über Mobilfunk mit Router B hinter LTE
@@ -460,6 +467,8 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
+- **2.5.1** (28.10.2026) – Wächter startet `wan6` neu, wenn die IPv6 des WAN-Anschlusses im Kernel fehlt, die
+  Firmware sie aber noch führt (gesehen am LTE-Hotspot Netgear M1).
 - **2.5** (27.10.2026) – Menü mit Pfeiltasten, Enter und Esc für alle Funktionen: Assistenten zum Anlegen,
   Einstellungen mit aktuellem Wert, Netzauswahl per Häkchen, Sicherheitsabfrage beim Löschen; ohne Zusatzprogramme.
   Das Zahlenmenü bleibt als `menue-einfach`, alle Befehle bleiben unverändert.

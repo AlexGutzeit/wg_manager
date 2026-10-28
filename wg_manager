@@ -1,7 +1,8 @@
 #!/bin/sh
 # ============================================================================
 #  wg_manager – WireGuard-Zugänge auf Freifunk-Franken-Routern (Layer3)
-#  Version 2.5 (27.10.2026) – Menü mit Pfeiltasten (Enter, Esc) für alles, ohne Terminal-Fachwissen.
+#  Version 2.5.1 (28.10.2026) – Wächter holt eine verlorene IPv6 des WAN-Anschlusses zurück (ifup wan6).
+#  2.5: Menü mit Pfeiltasten (Enter, Esc) für alles, ohne Terminal-Fachwissen.
 #  2.4: Netzverbindungen (Netz ↔ Netz, Ersatznetz); WAN als Netz für Gerätetunnel. 2.3: Babel-Verbindungen
 #
 #  Alle Einstellungen stehen in /etc/config/wgmanager (Tunnel + Geräte).
@@ -22,7 +23,7 @@
 #  Dieses Programm ist freie Software und kommt OHNE JEDE GEWÄHRLEISTUNG.
 # ============================================================================
 
-WGM_VERSION=2.5
+WGM_VERSION=2.5.1
 CFG=wgmanager
 CFG_FILE=/etc/config/$CFG
 KEY_DIR=/etc/wireguard
@@ -993,6 +994,27 @@ cmd_babel_mtu() { # name
     babel_negotiate "$1"
 }
 
+wan6_check() { # IPv6 des WAN-Anschlusses, die netifd noch führt, der Kernel aber verloren hat -> Schnittstelle neu
+    # Gesehen am LTE-Hotspot Netgear M1: nach seiner täglichen Neuanmeldung verschwindet die Adresse, odhcp6c merkt
+    # es nicht, alle Tunnel über das WAN stehen still – bis wan6 neu startet. Höchstens alle 15 Minuten.
+    local i dev a now last
+    for i in $(uci -q show network | sed -n "s/^network\.\([^.]*\)\.proto='dhcpv6'$/\1/p"); do
+        [ "$(ifstatus $i 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] || continue
+        dev=$(ifstatus $i 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null)
+        [ -n "$dev" ] || continue
+        for a in $(ifstatus $i 2>/dev/null | jsonfilter -e '@["ipv6-address"][*].address' 2>/dev/null); do
+            ip -6 addr show dev "$dev" 2>/dev/null | grep -q "inet6 $a/" && continue
+            now=$(date +%s)
+            last=$(cat "$BABEL_STATE/.ifup_$i" 2>/dev/null)
+            [ $((now - ${last:-0})) -lt 900 ] && break
+            echo "$now" > "$BABEL_STATE/.ifup_$i"
+            log "$i: IPv6 des Anschlusses fehlt im Kernel (netifd führt sie noch) – starte $i neu"
+            ifup "$i"
+            break
+        done
+    done
+}
+
 cmd_babel_check() { # Wächter (cron): Selbstheilung + MTU aushandeln, sobald sich die Router gefunden haben
     local need=0 t b ifn ep sep smtu stime now
     for t in $(tunnels); do ip link show "$(tget $t ifname)" >/dev/null 2>&1 || need=1; done
@@ -1010,6 +1032,7 @@ cmd_babel_check() { # Wächter (cron): Selbstheilung + MTU aushandeln, sobald si
         /etc/init.d/fff-bird restart >/dev/null 2>&1
     fi
     mkdir -p $BABEL_STATE
+    wan6_check
     now=$(date +%s)
     for b in $(babels); do
         ifn=$(bget $b ifname)
