@@ -205,7 +205,7 @@ antwortet), sucht jede Seite für ihre Senderichtung stufenweise die größte MT
 voller Paketgröße durch den Tunnel. Wird ein Paket unterwegs zerlegt, gilt die Größe als zu groß. Hin- und Rückweg
 können verschieden sein (z. B. bei LTE).
 
-Ein **Wächter** (alle 5 Minuten) handelt neu aus, wenn die Verbindung weg war oder sich die Adresse der Gegenstelle
+Ein **Wächter** (jede Minute) handelt neu aus, wenn die Verbindung weg war oder sich die Adresse der Gegenstelle
 ändert, und prüft stündlich, ob die MTU noch durchkommt. Von Hand: `wg_manager babel-mtu <name>`.
 Hat der WAN-Anschluss seine IPv6 verloren, obwohl die Firmware sie noch für vorhanden hält, startet der Wächter
 `wan6` neu (höchstens alle 15 Minuten, Eintrag im Protokoll) – siehe Eigenheiten.
@@ -337,7 +337,7 @@ Optionen für `tunnel-neu` / `tunnel-aendern`: `--netz "<netz> …"`, `--zugriff
 | `babel-mtu <name>` | MTU jetzt neu aushandeln |
 | `babel-aendern <name> --rxcost N` | rxcost nachträglich ändern (Router A und B) |
 | `babel-loeschen <name>` | Babel-Verbindung entfernen |
-| `babel-pruefen` | Wächter (läuft alle 5 Minuten von selbst) |
+| `babel-pruefen` | Wächter (läuft jede Minute von selbst) |
 
 **Netzverbindungen**
 
@@ -377,8 +377,9 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   Vielfaches von 16 auf, aber nie über die MTU) und zählt, ob der Kernel beim Absenden zerlegt hat
   (`Ip6FragCreates`) – das erkennt auch einen eigenen Uplink-Tunnel mit kleinerer MTU.
 - Der Wächter liegt bei micrond der Firmware in `/usr/lib/micron.d/wg_manager` (die Firmware liest kein
-  `/etc/crontabs`). Er läuft, sobald wg_manager etwas verwaltet – auch nur Gerätetunnel –, und setzt aus,
-  solange `configure-layer3` läuft.
+  `/etc/crontabs`). Er läuft jede Minute, sobald wg_manager etwas verwaltet – auch nur Gerätetunnel –, und setzt
+  aus, solange `configure-layer3` oder ein anderer wg_manager-Aufruf läuft (ein normaler Lauf dauert unter einer
+  Sekunde).
 
 ### Netzverbindungen im Detail
 
@@ -403,11 +404,12 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   file or directory“), und procd gibt auf. Ein leerer Ordner stört nicht, und bird 2.15.1 (20241219) ist nicht
   betroffen. wg_manager startet bird in diesem Fall selbst – beim Anwenden und über den Wächter.
 - Auf der Beta-Firmware fehlt `birdc`; die Babel-Nachbarn zeigt `birdcl show babel neighbors`.
-- **IPv6 am WAN geht verloren (LTE-Hotspot Netgear Nighthawk M1):** Nach der täglichen Neuanmeldung des Hotspots im
-  Mobilfunknetz verschwindet die IPv6 des WAN-Anschlusses aus dem Kernel, netifd/odhcp6c führen sie aber weiter.
-  IPv4 läuft normal, doch alle Tunnel über IPv6 stehen still – stundenlang, bis `wan6` neu startet (Kabel ziehen
-  wirkt genauso). Der Wächter erkennt genau diesen Widerspruch und führt `ifup wan6` aus; die Tunnel stehen nach
-  rund 20 Sekunden wieder, die Babel-Routen nach etwa einer Minute.
+- **IPv6 am WAN geht verloren (LTE-Hotspot Netgear Nighthawk M1):** Der Hotspot sendet nur selten
+  Router-Ankündigungen (etwa einmal am Tag, Präfix mit unbegrenzter Lebensdauer). Kommt eine, während `wan6` schon
+  läuft, löscht netifd die IPv6 des WAN-Anschlusses im Kernel, führt sie selbst aber weiter (per `ip -6 monitor` und
+  `tcpdump` nachgewiesen). IPv4 läuft normal, doch alle Tunnel über IPv6 stehen still – stundenlang, bis `wan6` neu
+  startet (Kabel ziehen wirkt genauso). Der Wächter erkennt genau diesen Widerspruch und führt `ifup wan6` aus; die
+  Tunnel stehen nach rund 20 Sekunden wieder, die Babel-Routen nach etwa einer Minute.
 
 ## Gut zu wissen
 
@@ -468,6 +470,8 @@ Eingerückt wird mit vier Leerzeichen.
 
 ## Versionen
 
+- **2.5.3** (30.10.2026) – Wächter läuft jede Minute statt alle 5 Minuten (eine verlorene WAN-IPv6 ist so nach
+  höchstens gut einer Minute zurück); läuft gerade ein anderer wg_manager-Aufruf, setzt er die Runde aus.
 - **2.5.2** (28.10.2026) – Wächter läuft auch auf Routern mit nur Gerätetunneln (stellt von der Firmware gelöschte
   Tunnel wieder her, prüft die IPv6 am WAN) und setzt aus, solange `configure-layer3` läuft.
 - **2.5.1** (28.10.2026) – Wächter startet `wan6` neu, wenn die IPv6 des WAN-Anschlusses im Kernel fehlt, die

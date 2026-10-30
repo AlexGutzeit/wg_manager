@@ -1,5 +1,5 @@
 # =====================================================================
-#  wg_manager 2.5.2 – WireGuard-Zugänge für Freifunk-Franken-Router (Layer 3)
+#  wg_manager 2.5.3 – WireGuard-Zugänge für Freifunk-Franken-Router (Layer 3)
 #  Quelle: https://github.com/AlexGutzeit/wg_manager  (GPL-3.0-or-later)
 #
 #  Installation – eine der beiden Arten:
@@ -25,7 +25,8 @@ cat << 'WG_MANAGER_ENDE' > /usr/sbin/wg_manager
 #!/bin/sh
 # ============================================================================
 #  wg_manager – WireGuard-Zugänge auf Freifunk-Franken-Routern (Layer3)
-#  Version 2.5.2 (28.10.2026) – Wächter auch bei nur Gerätetunneln; Pause während configure-layer3.
+#  Version 2.5.3 (30.10.2026) – Wächter jede Minute (setzt aus, solange ein anderer Aufruf läuft).
+#  2.5.2: Wächter auch bei nur Gerätetunneln; Pause während configure-layer3.
 #  2.5.1: Wächter holt eine verlorene IPv6 des WAN-Anschlusses zurück (ifup wan6).
 #  2.5: Menü mit Pfeiltasten (Enter, Esc) für alles, ohne Terminal-Fachwissen.
 #  2.4: Netzverbindungen (Netz ↔ Netz, Ersatznetz); WAN als Netz für Gerätetunnel. 2.3: Babel-Verbindungen
@@ -86,7 +87,7 @@ BABEL_STATE=/tmp/wg_manager
 SNIP_TAG=wgm-babel1
 MICRON_DIR=/usr/lib/micron.d
 CRON_FILE=/etc/crontabs/root
-CRON_LINE="*/5 * * * * /usr/sbin/wg_manager babel-pruefen -q"
+CRON_LINE="* * * * * /usr/sbin/wg_manager babel-pruefen -q"
 
 # Netzverbindungen (ein Netz von Router A, z. B. sein Fritzbox-Netz, für ein Netz von Router B erreichbar machen):
 # Seite A gibt das Netz frei und erzeugt eine Zeile, Seite B fügt sie ein. Nur B → A und nur IPv4; beide Seiten
@@ -936,7 +937,7 @@ EOF
     if babel_connected bb_$name; then
         ok "Verbunden mit $(snip_field "$line" von)."
         babel_negotiate "$name"
-        say "Die Gegenseite handelt ihre MTU beim nächsten Lauf ihres Wächters aus (spätestens in 5 Minuten)."
+        say "Die Gegenseite handelt ihre MTU beim nächsten Lauf ihres Wächters aus (spätestens in einer Minute)."
     else
         warn "Noch keine Verbindung. Prüfen: Hat dieser Router IPv6 am Anschluss? Ist Port $port auf Router A erreichbar? Der Wächter versucht es weiter; Stand: wg_manager liste"
     fi
@@ -1021,8 +1022,9 @@ cmd_babel_mtu() { # name
 }
 
 wan6_check() { # IPv6 des WAN-Anschlusses, die netifd noch führt, der Kernel aber verloren hat -> Schnittstelle neu
-    # Gesehen am LTE-Hotspot Netgear M1: nach seiner täglichen Neuanmeldung verschwindet die Adresse, odhcp6c merkt
-    # es nicht, alle Tunnel über das WAN stehen still – bis wan6 neu startet. Höchstens alle 15 Minuten.
+    # Gesehen am LTE-Hotspot Netgear M1: verarbeitet netifd eine Router-Ankündigung, während wan6 schon läuft,
+    # löscht es die Adresse im Kernel und führt sie selbst weiter – alle Tunnel über das WAN stehen still, bis wan6
+    # neu startet. Höchstens alle 15 Minuten.
     local i dev a now last
     for i in $(uci -q show network | sed -n "s/^network\.\([^.]*\)\.proto='dhcpv6'$/\1/p"); do
         [ "$(ifstatus $i 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ] || continue
@@ -1866,7 +1868,7 @@ cmd_list() {
     done
     [ -n "$(babels)" ] && say "${BLUE}Babel-Verbindungen (Router ↔ Router)${NC}"
     if [ -n "$(babels)" ] && [ -d /etc/bird/fff ] && ! pidof bird >/dev/null; then
-        say "  ${RED}ACHTUNG: bird läuft nicht – kein Babel, keine Routen!${NC} Starten: wg_manager babel-pruefen (macht der Wächter auch alle 5 min)"
+        say "  ${RED}ACHTUNG: bird läuft nicht – kein Babel, keine Routen!${NC} Starten: wg_manager babel-pruefen (macht der Wächter auch jede Minute)"
     fi
     for t in $(babels); do
         ifn=$(bget $t ifname)
@@ -2769,7 +2771,7 @@ tui_tools() {
             "Netze des Routers anzeigen|Client-Netze und WAN – dorthin können Gerätetunnel führen" \
             "MTU messen|Strecke ins Internet messen und alle Tunnel prüfen" \
             "Alles neu anwenden (reparieren)|Schreibt Netz, Firewall und bird aus /etc/config/wgmanager neu" \
-            "Wächter jetzt laufen lassen|Stellt Fehlendes wieder her, startet bird, handelt die MTU aus (läuft sonst alle 5 Minuten)" \
+            "Wächter jetzt laufen lassen|Stellt Fehlendes wieder her, startet bird, handelt die MTU aus (läuft sonst jede Minute)" \
             "Protokoll anzeigen|Die letzten Meldungen von wg_manager" \
             "Befehle für die Kommandozeile|Alles aus diesem Menü gibt es auch als Befehl" || return 0
         s=$TUI_SEL
@@ -2812,7 +2814,7 @@ Babel-Verbindungen (zwei Freifunk-Router koppeln, z. B. einen Router hinter LTE)
   babel-mtu <name>                   MTU jetzt neu aushandeln
   babel-aendern <name> --rxcost N    Babel-Kosten ändern (1–65535, beide Seiten; auf dem anderen Router gleich einstellen)
   babel-loeschen <name>
-  babel-pruefen [-q]                 Wächter (cron, alle 5 min): stellt Fehlendes wieder her, handelt die MTU aus
+  babel-pruefen [-q]                 Wächter (cron, jede Minute): stellt Fehlendes wieder her, handelt die MTU aus
 
 Netzverbindungen (ein Netz von Router A aus einem Netz von Router B erreichen, z. B. einen Drucker; nur IPv4):
   netz-neu <name> [--netz wan|<netz>] [--ersatz a.b.c.d/p] [--port N]
@@ -2842,8 +2844,13 @@ case "$1" in
     babel-zeige) ensure_env; shift; cmd_babel_show "$1" ;;
     netz-zeige) ensure_env; shift; cmd_link_show "$1" ;;
     *)
-        # Sperre auch bei Abbruch (Strg-C, abgeschnittene Ausgabe) freigeben, sonst hängen alle weiteren Aufrufe
-        [ -x /bin/lock ] && { lock "$LOCK"; trap 'lock -u "$LOCK"' EXIT; trap 'exit 1' INT TERM HUP PIPE; }
+        # Sperre auch bei Abbruch (Strg-C, abgeschnittene Ausgabe) freigeben, sonst hängen alle weiteren Aufrufe.
+        # Der Wächter wartet nicht: läuft gerade ein anderer Aufruf, setzt er diese Runde aus (sonst stauen sich
+        # bei einer hängenden Sperre jede Minute neue Prozesse).
+        if [ -x /bin/lock ]; then
+            if [ "$1" = babel-pruefen ]; then lock -n "$LOCK" 2>/dev/null || exit 0; else lock "$LOCK"; fi
+            trap 'lock -u "$LOCK"' EXIT; trap 'exit 1' INT TERM HUP PIPE
+        fi
         ensure_env
         c="$1"; shift
         [ "$1" = "-q" ] && { QUIET=1; shift; }
