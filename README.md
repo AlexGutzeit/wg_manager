@@ -404,12 +404,14 @@ Alle Einstellungen stehen in `/etc/config/wgmanager`, die Schlüssel in `/etc/wi
   file or directory“), und procd gibt auf. Ein leerer Ordner stört nicht, und bird 2.15.1 (20241219) ist nicht
   betroffen. wg_manager startet bird in diesem Fall selbst – beim Anwenden und über den Wächter.
 - Auf der Beta-Firmware fehlt `birdc`; die Babel-Nachbarn zeigt `birdcl show babel neighbors`.
-- **IPv6 am WAN geht verloren (LTE-Hotspot Netgear Nighthawk M1):** Der Hotspot sendet nur selten
-  Router-Ankündigungen (etwa einmal am Tag, Präfix mit unbegrenzter Lebensdauer). Kommt eine, während `wan6` schon
-  läuft, löscht netifd die IPv6 des WAN-Anschlusses im Kernel, führt sie selbst aber weiter (per `ip -6 monitor` und
-  `tcpdump` nachgewiesen). IPv4 läuft normal, doch alle Tunnel über IPv6 stehen still – stundenlang, bis `wan6` neu
-  startet (Kabel ziehen wirkt genauso). Der Wächter erkennt genau diesen Widerspruch und führt `ifup wan6` aus; die
-  Tunnel stehen nach rund 20 Sekunden wieder, die Babel-Routen nach etwa einer Minute.
+- **IPv6 am WAN geht verloren (LTE-Hotspot Netgear Nighthawk M1):** Fehler in netifd von OpenWrt 24.10, der jeden
+  Anschluss treffen kann, dessen Präfix wechselt. Der Hotspot wechselt es etwa täglich, das alte läuft zwei Stunden
+  später ab. Bei der nächsten Router-Ankündigung (sie kommen nur alle paar Stunden) rückt die neue Adresse in der
+  Adressliste von netifd auf einen anderen Platz; netifd löscht sie dabei im Kernel, führt sie selbst aber weiter.
+  IPv4 läuft normal, doch alle Tunnel über IPv6 stehen still – stundenlang, bis `wan6` neu startet (Kabel ziehen
+  wirkt genauso). Der Wächter erkennt genau diesen Widerspruch und führt `ifup wan6` aus; die Tunnel stehen nach
+  rund 20 Sekunden wieder, die Babel-Routen nach etwa einer Minute. Behoben ist der Fehler im Quelltext von netifd
+  (Commit c6c2a2b, Juli 2026), aber noch nicht in OpenWrt 24.10.5.
 
 ## Gut zu wissen
 
